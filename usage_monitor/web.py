@@ -23,7 +23,7 @@ from .models import (
     COLLECTOR_PHASE_SCANNING,
     COLLECTOR_PHASE_SLEEPING,
 )
-from .timeutil import format_shanghai, utc_now_iso
+from .timeutil import utc_now_iso
 
 
 logger = logging.getLogger("usage_monitor.web")
@@ -154,10 +154,8 @@ def _control_state_from_runtime(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "manual_trigger_pending": bool(manual_trigger_requested_at_utc),
         "manual_trigger_requested_at_utc": manual_trigger_requested_at_utc,
-        "manual_trigger_requested_at_shanghai": format_shanghai(manual_trigger_requested_at_utc),
         "manual_stop_pending": bool(manual_stop_requested_at_utc),
         "manual_stop_requested_at_utc": manual_stop_requested_at_utc,
-        "manual_stop_requested_at_shanghai": format_shanghai(manual_stop_requested_at_utc),
         "can_manual_start": can_manual_start,
         "can_manual_stop": can_manual_stop,
     }
@@ -196,7 +194,6 @@ def build_progress_payload(
 
     payload = {
         "generated_at": generated_at,
-        "generated_at_shanghai": format_shanghai(generated_at),
         "phase": phase,
         "total_scanned": total_scanned,
         "total_candidates": total_candidates,
@@ -208,13 +205,9 @@ def build_progress_payload(
         "current_source_file": source_file,
         "current_source_file_name": _source_file_name(source_file),
         "round_started_at_utc": round_started_at_utc,
-        "round_started_at_shanghai": format_shanghai(round_started_at_utc),
         "round_finished_at_utc": str(row.get("round_finished_at_utc") or ""),
-        "round_finished_at_shanghai": format_shanghai(row.get("round_finished_at_utc")),
         "next_round_at_utc": str(row.get("next_round_at_utc") or ""),
-        "next_round_at_shanghai": format_shanghai(row.get("next_round_at_utc")),
         "last_heartbeat_at_utc": str(row.get("last_heartbeat_at_utc") or ""),
-        "last_heartbeat_at_shanghai": format_shanghai(row.get("last_heartbeat_at_utc")),
         "last_error_detail": str(row.get("last_error_detail") or ""),
         "progress_percent": progress_percent,
         "poll_interval_ms": _progress_poll_interval_ms(phase, control_state),
@@ -319,9 +312,7 @@ def build_dashboard_payload(
                 "remaining_percent_text": remaining_percent_text,
                 "remaining_percent_value": remaining_percent_value,
                 "reset_at_utc": reset_at_utc,
-                "reset_at_shanghai": format_shanghai(reset_at_utc),
                 "last_checked_at_utc": last_checked_at_utc,
-                "last_checked_at_shanghai": format_shanghai(last_checked_at_utc),
                 "note": note or "-",
                 "source_file": source_file,
                 "source_file_name": _source_file_name(source_file),
@@ -332,10 +323,55 @@ def build_dashboard_payload(
     generated_at = utc_now_iso()
     return {
         "generated_at": generated_at,
-        "generated_at_shanghai": format_shanghai(generated_at),
         "filter": current_filter,
         "summary": summary,
         "items": items,
+    }
+
+
+def build_dashboard_overview_payload(
+    settings: Settings,
+    filter_name: str,
+    database: UsageDatabase | None = None,
+) -> dict[str, Any]:
+    dashboard_payload = build_dashboard_payload(settings, filter_name, database)
+    return {
+        "generated_at": dashboard_payload["generated_at"],
+        "filter": dashboard_payload["filter"],
+        "summary": dashboard_payload["summary"],
+    }
+
+
+def build_dashboard_patch_payload(
+    previous_payload: dict[str, Any],
+    current_payload: dict[str, Any],
+) -> dict[str, Any]:
+    previous_items = {
+        str(item.get("dimension_key") or ""): item
+        for item in previous_payload.get("items", [])
+        if str(item.get("dimension_key") or "")
+    }
+    current_items = {
+        str(item.get("dimension_key") or ""): item
+        for item in current_payload.get("items", [])
+        if str(item.get("dimension_key") or "")
+    }
+    upserted_items = [
+        item
+        for dimension_key, item in current_items.items()
+        if previous_items.get(dimension_key) != item
+    ]
+    removed_dimension_keys = [
+        dimension_key
+        for dimension_key in previous_items
+        if dimension_key not in current_items
+    ]
+    return {
+        "generated_at": str(current_payload.get("generated_at") or ""),
+        "filter": str(current_payload.get("filter") or ""),
+        "summary": current_payload.get("summary") or {},
+        "upserted_items": upserted_items,
+        "removed_dimension_keys": removed_dimension_keys,
     }
 
 
@@ -1815,9 +1851,9 @@ def _render_index_header() -> str:
 
       <section class="topbar surface">
         <div class="title-group">
-          <div class="eyebrow">Operations Dashboard</div>
+          <div class="eyebrow">Usage Monitor</div>
           <h1 class="title">usage-monitor</h1>
-          <p class="subtitle">定时采集账号主额度状态，页面改为 SSE 实时推送；支持手动开始下一轮和安全停止本轮，两个动作都需要二次确认。</p>
+          <p class="subtitle">持续采集账号主额度状态，帮助快速识别可用账号、异常账号与即将重置的账号；支持手动开始下一轮和安全停止本轮。</p>
         </div>
         <div class="meta-panel" aria-label="页面状态">
           <div class="meta-item">
@@ -1837,10 +1873,10 @@ def _render_index_header() -> str:
         <div class="progress-main surface surface-accent">
           <div class="progress-head">
             <div class="progress-title-block">
-              <div class="section-kicker">Collector Runtime</div>
+              <div class="section-kicker">运行状态</div>
               <div class="progress-title-row">
                 <div class="card-label">本轮进度</div>
-                <div class="progress-refresh-hint">SSE 实时推送</div>
+                <div class="progress-refresh-hint">自动更新</div>
               </div>
             </div>
             <div class="progress-head-actions">
@@ -1993,6 +2029,7 @@ def _render_index_script(
     const STICKY_TABLE_TOP = 0;
     const TABLE_CARD_BREAKPOINT = 900;
     const MOBILE_LAYOUT_BREAKPOINT = 768;
+    const TABLE_COLUMN_COUNT = {_TABLE_COLUMN_COUNT};
     const STICKY_QUICK_FILTERS = ["all", "active", "available", "exhausted", "invalid"];
     const initialDashboardPayload = {initial_dashboard_js};
     const initialProgressPayload = {initial_progress_js};
@@ -2008,8 +2045,8 @@ def _render_index_script(
       lastFocusedElement: null,
       sortKey: "last_checked_at_utc",
       sortDirection: "desc",
-      items: Array.isArray(initialDashboardPayload.items) ? initialDashboardPayload.items : [],
-      summary: initialDashboardPayload.summary || {{}},
+      items: [],
+      summary: {{}},
       lastRenderedMode: ""
     }};
 
@@ -2066,12 +2103,23 @@ def _render_index_script(
     }};
     const progressDescriptions = {{
       idle: "当前空闲，等待下一轮或手动开始。",
-      scanning: "正在扫描 tokens 目录，整理账号列表。",
-      querying: "正在逐个查询账号额度状态。",
-      reconciling: "正在收尾整理本轮运行结果。",
+      scanning: "正在整理账号列表。",
+      querying: "正在查询账号额度状态。",
+      reconciling: "正在整理本轮结果。",
       sleeping: "本轮已结束，等待下一个自动周期。",
       error: "运行出现异常，可手动开始下一轮重试。"
     }};
+    const shanghaiDateTimeFormatter = new Intl.DateTimeFormat("zh-CN", {{
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    }});
+    const shanghaiTimeTextCache = new Map();
 
     // 基础工具
     function escapeHtml(value) {{
@@ -2130,6 +2178,54 @@ def _render_index_script(
 
     function withPrefix(path) {{
       return `${{urlPrefix}}${{path}}`;
+    }}
+
+    function formatUtcToShanghai(value, empty = "-") {{
+      const text = String(value || "").trim();
+      if (!text) {{
+        return empty;
+      }}
+
+      const cacheKey = empty === "-" ? text : "";
+      if (cacheKey && shanghaiTimeTextCache.has(cacheKey)) {{
+        return shanghaiTimeTextCache.get(cacheKey) || empty;
+      }}
+
+      const date = new Date(text);
+      if (Number.isNaN(date.getTime())) {{
+        return empty;
+      }}
+
+      const mapped = {{}};
+      shanghaiDateTimeFormatter.formatToParts(date).forEach((part) => {{
+        if (part.type !== "literal") {{
+          mapped[part.type] = part.value;
+        }}
+      }});
+      const formatted = `${{mapped.year || "0000"}}-${{mapped.month || "00"}}-${{mapped.day || "00"}} ${{mapped.hour || "00"}}:${{mapped.minute || "00"}}:${{mapped.second || "00"}}`;
+
+      if (cacheKey) {{
+        if (shanghaiTimeTextCache.size >= 4096) {{
+          shanghaiTimeTextCache.clear();
+        }}
+        shanghaiTimeTextCache.set(cacheKey, formatted);
+      }}
+      return formatted;
+    }}
+
+    function formatCompactDateTimeText(value) {{
+      const text = formatUtcToShanghai(value, "");
+      if (!text) {{
+        return "-";
+      }}
+      const parts = text.split(" ");
+      const datePart = parts[0] || "";
+      const timeMatch = text.match(/\\b\\d{{2}}:\\d{{2}}/);
+      const shortDate = /^\\d{{4}}-\\d{{2}}-\\d{{2}}$/.test(datePart) ? datePart.slice(5) : datePart;
+      if (timeMatch) {{
+        return `${{shortDate}} ${{timeMatch[0]}}`.trim();
+      }}
+      return shortDate || text;
     }}
 
     function formatProgressPercent(value) {{
@@ -2205,7 +2301,7 @@ def _render_index_script(
     }}
 
     function renderDateTimeCell(value) {{
-      const text = String(value || "").trim();
+      const text = formatUtcToShanghai(value, "");
       if (!text || text === "-") {{
         return '<div class="cell-time"><span class="cell-time-date">-</span></div>';
       }}
@@ -2221,21 +2317,6 @@ def _render_index_script(
         `;
       }}
       return `<div class="cell-time"><span class="cell-time-date">${{escapeHtml(text)}}</span></div>`;
-    }}
-
-    function formatCompactDateTimeText(value) {{
-      const text = String(value || "").trim();
-      if (!text || text === "-") {{
-        return "-";
-      }}
-      const parts = text.split(" ");
-      const datePart = parts[0] || "";
-      const timeMatch = text.match(/\\b\\d{{2}}:\\d{{2}}/);
-      const shortDate = /^\\d{{4}}-\\d{{2}}-\\d{{2}}$/.test(datePart) ? datePart.slice(5) : datePart;
-      if (timeMatch) {{
-        return `${{shortDate}} ${{timeMatch[0]}}`.trim();
-      }}
-      return shortDate || text;
     }}
 
     function renderMobileMetric(label, value, extraClass = "") {{
@@ -2261,8 +2342,8 @@ def _render_index_script(
 
       const rows = items.map((item) => {{
         const remainingText = item.remaining_percent_text || "-";
-        const resetText = formatCompactDateTimeText(item.reset_at_shanghai || "-");
-        const checkedText = formatCompactDateTimeText(item.last_checked_at_shanghai || "-");
+        const resetText = formatCompactDateTimeText(item.reset_at_utc || "");
+        const checkedText = formatCompactDateTimeText(item.last_checked_at_utc || "");
         const sourceValue = String(item.source_file_name || item.source_file || "").trim();
         const extraParts = [];
         if (item.note && String(item.note).trim() && String(item.note).trim() !== "-") {{
@@ -2492,15 +2573,85 @@ def _render_index_script(
       }}
     }}
 
-    function applyDashboardPayload(payload) {{
+    function areSummaryEqual(left, right) {{
+      const keys = ["total", "active", "available", "exhausted", "unknown", "invalid", "source_missing"];
+      return keys.every((key) => Number((left && left[key]) ?? 0) === Number((right && right[key]) ?? 0));
+    }}
+
+    function updateGeneratedAt(value) {{
+      document.getElementById("generated-at").textContent = formatUtcToShanghai(value);
+    }}
+
+    function renderDashboardPlaceholder(message = "正在加载账号数据...") {{
+      const tbody = document.getElementById("rows");
+      const mobileList = document.getElementById("mobile-list");
+      if (tbody) {{
+        tbody.innerHTML = `<tr><td colspan="${{TABLE_COLUMN_COUNT}}" class="empty">${{escapeHtml(message)}}</td></tr>`;
+      }}
+      if (mobileList) {{
+        mobileList.innerHTML = `<div class="empty">${{escapeHtml(message)}}</div>`;
+      }}
+      updateTableMeta(0);
+      window.requestAnimationFrame(syncStickyHeaderLayout);
+    }}
+
+    function applyDashboardOverview(payload) {{
+      if (!payload || typeof payload !== "object") {{
+        return;
+      }}
+      if (!areSummaryEqual(payload.summary || {{}}, state.summary || {{}})) {{
+        renderSummary(payload.summary || {{}});
+      }} else {{
+        state.summary = payload.summary || {{}};
+        renderStickyQuickFilters(state.summary);
+      }}
+      updateGeneratedAt(payload.generated_at || "");
+      showError("");
+      setDashboardBusy(false);
+    }}
+
+    function applyDashboardSnapshot(payload) {{
       if (!payload || typeof payload !== "object") {{
         return;
       }}
       state.items = Array.isArray(payload.items) ? payload.items : [];
-      renderSummary(payload.summary || {{}});
+      applyDashboardOverview(payload);
       renderRows(state.items);
       renderSortButtons();
-      document.getElementById("generated-at").textContent = payload.generated_at_shanghai || payload.generated_at || "-";
+    }}
+
+    function applyDashboardPatch(payload) {{
+      if (!payload || typeof payload !== "object") {{
+        return;
+      }}
+
+      const nextSummary = payload.summary || state.summary || {{}};
+      if (!areSummaryEqual(nextSummary, state.summary || {{}})) {{
+        renderSummary(nextSummary);
+      }}
+
+      const upsertedItems = Array.isArray(payload.upserted_items) ? payload.upserted_items : [];
+      const removedDimensionKeys = Array.isArray(payload.removed_dimension_keys) ? payload.removed_dimension_keys : [];
+      if (upsertedItems.length > 0 || removedDimensionKeys.length > 0) {{
+        const itemsMap = new Map(state.items.map((item) => [String(item.dimension_key || ""), item]));
+        upsertedItems.forEach((item) => {{
+          const dimensionKey = String(item.dimension_key || "");
+          if (dimensionKey) {{
+            itemsMap.set(dimensionKey, item);
+          }}
+        }});
+        removedDimensionKeys.forEach((dimensionKey) => {{
+          itemsMap.delete(String(dimensionKey || ""));
+        }});
+        state.items = Array.from(itemsMap.values());
+        renderRows(state.items);
+        renderSortButtons();
+      }} else {{
+        state.summary = nextSummary;
+        renderStickyQuickFilters(state.summary);
+      }}
+
+      updateGeneratedAt(payload.generated_at || "");
       showError("");
       setDashboardBusy(false);
     }}
@@ -2516,12 +2667,12 @@ def _render_index_script(
 
     function connectEventStream(showBusy = false) {{
       if (typeof window.EventSource !== "function") {{
-        showError("当前浏览器不支持 SSE 实时推送。");
+        showError("当前浏览器不支持实时更新，请更换浏览器。");
         return;
       }}
 
       closeEventStream();
-      if (showBusy) {{
+      if (showBusy || state.items.length === 0) {{
         setDashboardBusy(true);
       }}
 
@@ -2556,7 +2707,18 @@ def _render_index_script(
         if (!payload) {{
           return;
         }}
-        applyDashboardPayload(payload);
+        applyDashboardSnapshot(payload);
+      }});
+
+      source.addEventListener("dashboard_patch", (event) => {{
+        if (state.eventSource !== source) {{
+          return;
+        }}
+        const payload = parseEventPayload(event);
+        if (!payload) {{
+          return;
+        }}
+        applyDashboardPatch(payload);
       }});
 
       source.onerror = () => {{
@@ -2566,7 +2728,7 @@ def _render_index_script(
         state.eventStreamConnected = false;
         setDashboardBusy(false);
         if (!state.reconnectMessageShown) {{
-          showError("SSE 连接中断，正在自动重连...");
+          showError("实时连接中断，正在自动重连...");
           state.reconnectMessageShown = true;
         }}
       }};
@@ -2607,7 +2769,7 @@ def _render_index_script(
 
       if (!preserveNote) {{
         if (payload.manual_stop_pending) {{
-          const requestedAt = payload.manual_stop_requested_at_shanghai || payload.manual_stop_requested_at_utc || "";
+          const requestedAt = formatUtcToShanghai(payload.manual_stop_requested_at_utc || "", "");
           setActionNote(
             requestedAt
               ? `停止请求已提交：${{requestedAt}}；当前账号处理完成后将停止本轮。`
@@ -2616,11 +2778,11 @@ def _render_index_script(
           return;
         }}
         if (payload.manual_trigger_pending) {{
-          const requestedAt = payload.manual_trigger_requested_at_shanghai || payload.manual_trigger_requested_at_utc || "";
+          const requestedAt = formatUtcToShanghai(payload.manual_trigger_requested_at_utc || "", "");
           setActionNote(
             requestedAt
-              ? `开始请求已提交：${{requestedAt}}；collector 将尽快开始下一轮。`
-              : "开始请求已提交；collector 将尽快开始下一轮。"
+              ? `开始请求已提交：${{requestedAt}}；系统将尽快开始下一轮。`
+              : "开始请求已提交；系统将尽快开始下一轮。"
           );
           return;
         }}
@@ -2710,6 +2872,12 @@ def _render_index_script(
       renderStickyQuickFilters();
     }}
 
+    function prepareDashboardForFilterChange() {{
+      state.items = [];
+      renderDashboardPlaceholder("正在加载账号数据...");
+      setDashboardBusy(true);
+    }}
+
     function renderProgress(payload) {{
       const phase = String(payload.phase || "idle");
       const totalCandidates = Number(payload.total_candidates || 0);
@@ -2740,10 +2908,10 @@ def _render_index_script(
       const sourceElement = document.getElementById("progress-source");
       sourceElement.textContent = sourceText;
       sourceElement.title = payload.current_source_file || "";
-      document.getElementById("progress-started").textContent = payload.round_started_at_shanghai || "-";
-      document.getElementById("progress-next-round").textContent = payload.next_round_at_shanghai || "-";
-      document.getElementById("progress-heartbeat").textContent = payload.last_heartbeat_at_shanghai || "-";
-      document.getElementById("progress-finished").textContent = payload.round_finished_at_shanghai || "-";
+      document.getElementById("progress-started").textContent = formatUtcToShanghai(payload.round_started_at_utc);
+      document.getElementById("progress-next-round").textContent = formatUtcToShanghai(payload.next_round_at_utc);
+      document.getElementById("progress-heartbeat").textContent = formatUtcToShanghai(payload.last_heartbeat_at_utc);
+      document.getElementById("progress-finished").textContent = formatUtcToShanghai(payload.round_finished_at_utc);
       setProgressNote(payload.last_error_detail || "", phase === "error");
       updateControlButtons(payload);
     }}
@@ -2919,10 +3087,10 @@ def _render_index_script(
           </td>
           <td data-label="剩余" class="col-remaining">${{renderRemainingCell(item)}}</td>
           <td data-label="重置时间" class="mono col-reset">
-            ${{renderDateTimeCell(item.reset_at_shanghai || "-")}}
+            ${{renderDateTimeCell(item.reset_at_utc || "")}}
           </td>
           <td data-label="最近查询" class="mono col-last-checked">
-            ${{renderDateTimeCell(item.last_checked_at_shanghai || "-")}}
+            ${{renderDateTimeCell(item.last_checked_at_utc || "")}}
           </td>
           <td data-label="备注" class="col-note" title="${{escapeHtml(item.note || "-")}}">
             <div class="cell-primary">${{escapeHtml(item.note || "-")}}</div>
@@ -2949,6 +3117,7 @@ def _render_index_script(
         return;
       }}
       setActiveFilter(button.dataset.filter || "all");
+      prepareDashboardForFilterChange();
       connectEventStream(true);
     }});
 
@@ -2958,6 +3127,7 @@ def _render_index_script(
         return;
       }}
       setActiveFilter(button.dataset.stickyFilter || "all");
+      prepareDashboardForFilterChange();
       connectEventStream(true);
     }});
 
@@ -3038,7 +3208,8 @@ def _render_index_script(
 
     // 初始化
     setActiveFilter(state.filter);
-    applyDashboardPayload(initialDashboardPayload);
+    applyDashboardOverview(initialDashboardPayload);
+    renderDashboardPlaceholder("正在加载账号数据...");
     applyProgressPayload(initialProgressPayload);
     updateControlButtons(initialProgressPayload);
     window.requestAnimationFrame(syncStickyHeaderLayout);
@@ -3287,7 +3458,7 @@ def create_app(settings: Settings):
         def _builder() -> bytes:
             html = render_index_page(
                 settings,
-                initial_dashboard_payload=build_dashboard_payload(settings, "active", database),
+                initial_dashboard_payload=build_dashboard_overview_payload(settings, "active", database),
                 initial_progress_payload=build_progress_payload(settings, database),
             ).encode("utf-8")
             if gzip_enabled and len(html) >= settings.web_gzip_min_bytes:
@@ -3298,12 +3469,14 @@ def create_app(settings: Settings):
 
     def _iter_event_stream(current_filter: str):
         initial_revisions = database.fetch_change_state()
+        current_dashboard_payload = build_dashboard_payload(settings, current_filter, database)
         yield f"retry: {EVENT_STREAM_RETRY_MS}\n\n".encode("utf-8")
         yield _encode_sse_event("progress", build_progress_payload(settings, database))
-        yield _encode_sse_event("dashboard", build_dashboard_payload(settings, current_filter, database))
+        yield _encode_sse_event("dashboard", current_dashboard_payload)
 
         last_accounts_revision = int(initial_revisions["accounts_revision"])
         last_runtime_revision = int(initial_revisions["runtime_revision"])
+        last_dashboard_payload = current_dashboard_payload
         last_keepalive_at = monotonic()
 
         try:
@@ -3321,11 +3494,16 @@ def create_app(settings: Settings):
 
                 if current_accounts_revision != last_accounts_revision:
                     last_accounts_revision = current_accounts_revision
-                    yield _encode_sse_event(
-                        "dashboard",
-                        build_dashboard_payload(settings, current_filter, database),
-                    )
-                    emitted = True
+                    next_dashboard_payload = build_dashboard_payload(settings, current_filter, database)
+                    patch_payload = build_dashboard_patch_payload(last_dashboard_payload, next_dashboard_payload)
+                    if (
+                        patch_payload["upserted_items"]
+                        or patch_payload["removed_dimension_keys"]
+                        or patch_payload["summary"] != last_dashboard_payload.get("summary")
+                    ):
+                        yield _encode_sse_event("dashboard_patch", patch_payload)
+                        emitted = True
+                    last_dashboard_payload = next_dashboard_payload
 
                 now = monotonic()
                 if emitted:

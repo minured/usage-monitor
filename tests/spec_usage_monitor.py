@@ -31,7 +31,13 @@ from usage_monitor.models import (
 from usage_monitor.openai_api import HTTPStatusError, InvalidResponseError, TransportError
 from usage_monitor.timeutil import format_shanghai
 from usage_monitor.tokens import scan_tokens_dir
-from usage_monitor.web import build_dashboard_payload, build_progress_payload, create_app
+from usage_monitor.web import (
+    build_dashboard_overview_payload,
+    build_dashboard_patch_payload,
+    build_dashboard_payload,
+    build_progress_payload,
+    create_app,
+)
 
 
 def make_usage_payload(*, allowed: bool = True, limit_reached: bool = False, used_percent: int = 1) -> dict:
@@ -612,6 +618,9 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(payload_by_email["a5@example.com"]["remaining_percent_text"], "-")
         self.assertNotIn("account_id", payload["items"][0])
         self.assertNotIn("chatgpt_user_id", payload["items"][0])
+        self.assertNotIn("reset_at_shanghai", payload["items"][0])
+        self.assertNotIn("last_checked_at_shanghai", payload["items"][0])
+        self.assertNotIn("generated_at_shanghai", payload)
 
         available_payload = build_dashboard_payload(self.settings, "available")
         self.assertEqual([item["email"] for item in available_payload["items"]], ["a1@example.com"])
@@ -627,6 +636,88 @@ class UsageMonitorTestCase(unittest.TestCase):
 
         source_missing_payload = build_dashboard_payload(self.settings, "source_missing")
         self.assertEqual([item["email"] for item in source_missing_payload["items"]], ["a4@example.com"])
+
+    def test_dashboard_overview_payload_omits_items(self) -> None:
+        database = UsageDatabase(self.settings.db_path)
+        database.initialize()
+        database.upsert_account(
+            {
+                "account_id": "acct-1",
+                "email": "one@example.com",
+                "source_file": "/tmp/one.json",
+                "source_mtime_ns": 1,
+                "lifecycle_status": LIFECYCLE_ACTIVE,
+                "quota_status": QUOTA_AVAILABLE,
+                "plan_type": "team",
+                "used_percent": 10.0,
+                "rate_limit_allowed": 1,
+                "rate_limit_reached": 0,
+                "reset_at_utc": "2026-03-18T00:00:00Z",
+                "last_checked_at_utc": "2026-03-18T00:00:00Z",
+                "last_success_at_utc": "2026-03-18T00:00:00Z",
+                "last_http_status": 200,
+                "consecutive_403_count": 0,
+                "invalid_reason_code": None,
+                "invalid_reason_detail": None,
+                "last_error_detail": None,
+                "updated_at_utc": "2026-03-18T00:00:00Z",
+            }
+        )
+
+        payload = build_dashboard_overview_payload(self.settings, "all")
+        self.assertEqual(payload["filter"], "all")
+        self.assertEqual(payload["summary"]["total"], 1)
+        self.assertNotIn("items", payload)
+
+    def test_dashboard_patch_payload_tracks_upserts_and_removals(self) -> None:
+        previous_payload = {
+            "generated_at": "2026-03-18T00:00:00Z",
+            "filter": "active",
+            "summary": {"total": 2, "active": 1, "available": 1, "exhausted": 0, "unknown": 0, "invalid": 1, "source_missing": 0},
+            "items": [
+                {
+                    "dimension_key": "acct-1::team::user-1",
+                    "email": "one@example.com",
+                    "lifecycle_status": "active",
+                    "quota_status": "available",
+                    "remaining_percent_text": "90%",
+                    "remaining_percent_value": 90.0,
+                    "reset_at_utc": "2026-03-18T00:00:00Z",
+                    "last_checked_at_utc": "2026-03-18T00:00:00Z",
+                    "note": "-",
+                    "source_file": "/tmp/one.json",
+                    "source_file_name": "one.json",
+                    "plan_type": "team",
+                }
+            ],
+        }
+        current_payload = {
+            "generated_at": "2026-03-18T00:05:00Z",
+            "filter": "active",
+            "summary": {"total": 2, "active": 1, "available": 0, "exhausted": 1, "unknown": 0, "invalid": 1, "source_missing": 0},
+            "items": [
+                {
+                    "dimension_key": "acct-2::team::user-2",
+                    "email": "two@example.com",
+                    "lifecycle_status": "active",
+                    "quota_status": "exhausted",
+                    "remaining_percent_text": "0%",
+                    "remaining_percent_value": 0.0,
+                    "reset_at_utc": "2026-03-18T00:05:00Z",
+                    "last_checked_at_utc": "2026-03-18T00:05:00Z",
+                    "note": "-",
+                    "source_file": "/tmp/two.json",
+                    "source_file_name": "two.json",
+                    "plan_type": "team",
+                }
+            ],
+        }
+
+        patch_payload = build_dashboard_patch_payload(previous_payload, current_payload)
+        self.assertEqual(patch_payload["filter"], "active")
+        self.assertEqual(patch_payload["generated_at"], "2026-03-18T00:05:00Z")
+        self.assertEqual(patch_payload["removed_dimension_keys"], ["acct-1::team::user-1"])
+        self.assertEqual([item["dimension_key"] for item in patch_payload["upserted_items"]], ["acct-2::team::user-2"])
 
     def test_dashboard_api_cache_refreshes_when_accounts_revision_changes(self) -> None:
         database = UsageDatabase(self.settings.db_path)
@@ -1113,8 +1204,10 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(payload["processed_candidates"], 1)
         self.assertEqual(payload["current_account_email"], "two@example.com")
         self.assertEqual(payload["current_source_file_name"], "token0002_demo.json")
-        self.assertEqual(payload["round_started_at_shanghai"], "2026-03-18 08:00:00")
-        self.assertEqual(payload["last_heartbeat_at_shanghai"], "2026-03-18 08:00:30")
+        self.assertEqual(payload["round_started_at_utc"], "2026-03-18T00:00:00Z")
+        self.assertEqual(payload["last_heartbeat_at_utc"], "2026-03-18T00:00:30Z")
+        self.assertNotIn("round_started_at_shanghai", payload)
+        self.assertNotIn("last_heartbeat_at_shanghai", payload)
         self.assertEqual(payload["poll_interval_ms"], 1000)
         self.assertEqual(payload["progress_percent"], 25.0)
         self.assertFalse(payload["can_manual_start"])
@@ -1166,7 +1259,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         payload = build_progress_payload(self.settings)
         self.assertTrue(payload["manual_trigger_pending"])
         self.assertEqual(payload["manual_trigger_requested_at_utc"], "2026-03-18T00:05:00Z")
-        self.assertEqual(payload["manual_trigger_requested_at_shanghai"], "2026-03-18 08:05:00")
+        self.assertNotIn("manual_trigger_requested_at_shanghai", payload)
         self.assertFalse(payload["can_manual_start"])
         self.assertEqual(payload["poll_interval_ms"], 1000)
 
@@ -1185,7 +1278,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         payload = build_progress_payload(self.settings)
         self.assertTrue(payload["manual_stop_pending"])
         self.assertEqual(payload["manual_stop_requested_at_utc"], "2026-03-18T00:06:00Z")
-        self.assertEqual(payload["manual_stop_requested_at_shanghai"], "2026-03-18 08:06:00")
+        self.assertNotIn("manual_stop_requested_at_shanghai", payload)
         self.assertFalse(payload["can_manual_stop"])
         self.assertEqual(payload["poll_interval_ms"], 1000)
 
@@ -1546,6 +1639,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertIn("const source = new EventSource(getEventStreamUrl());", body)
         self.assertIn('source.addEventListener("progress"', body)
         self.assertIn('source.addEventListener("dashboard"', body)
+        self.assertIn('source.addEventListener("dashboard_patch"', body)
         self.assertIn('"/api/scan"', body)
         self.assertIn('"/api/scan/stop"', body)
         self.assertIn('id="scan-stop-button"', body)
@@ -1567,6 +1661,9 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertIn("connectEventStream(true);", body)
         self.assertIn("connectEventStream(false);", body)
         self.assertIn("function renderMobileRows(items) {", body)
+        self.assertIn("function formatUtcToShanghai(value, empty = \"-\") {", body)
+        self.assertIn("function applyDashboardPatch(payload) {", body)
+        self.assertIn("function renderDashboardPlaceholder(message = \"正在加载账号数据...\") {", body)
         self.assertIn("function getPlanTagClass(planType) {", body)
         self.assertIn("function renderPlanTag(planType) {", body)
         self.assertIn("function getPlanTypePriority(planType) {", body)
@@ -1595,6 +1692,8 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertNotIn("loadDashboard()", body)
         self.assertNotIn("loadProgress()", body)
         self.assertNotIn("window.setInterval(loadDashboard", body)
+        self.assertNotIn("SSE 实时推送", body)
+        self.assertNotIn("页面改为 SSE", body)
 
 
 if __name__ == "__main__":
