@@ -284,7 +284,16 @@ def build_dashboard_payload(
     current_filter = filter_name if filter_name in FILTERS else "all"
     database = database if database is not None else UsageDatabase(settings.db_path)
     database.initialize()
-    summary, rows = database.fetch_dashboard(current_filter)
+    accounts_revision = 0
+    summary: dict[str, int] = {}
+    rows: list[Any] = []
+    for _ in range(3):
+        before_state = database.fetch_change_state()
+        summary, rows = database.fetch_dashboard(current_filter)
+        after_state = database.fetch_change_state()
+        accounts_revision = int(after_state["accounts_revision"])
+        if accounts_revision == int(before_state["accounts_revision"]):
+            break
 
     items: list[dict[str, Any]] = []
     for row in rows:
@@ -323,6 +332,7 @@ def build_dashboard_payload(
     generated_at = utc_now_iso()
     return {
         "generated_at": generated_at,
+        "accounts_revision": accounts_revision,
         "filter": current_filter,
         "summary": summary,
         "items": items,
@@ -337,6 +347,7 @@ def build_dashboard_overview_payload(
     dashboard_payload = build_dashboard_payload(settings, filter_name, database)
     return {
         "generated_at": dashboard_payload["generated_at"],
+        "accounts_revision": dashboard_payload["accounts_revision"],
         "filter": dashboard_payload["filter"],
         "summary": dashboard_payload["summary"],
     }
@@ -368,6 +379,7 @@ def build_dashboard_patch_payload(
     ]
     return {
         "generated_at": str(current_payload.get("generated_at") or ""),
+        "accounts_revision": int(current_payload.get("accounts_revision") or 0),
         "filter": str(current_payload.get("filter") or ""),
         "summary": current_payload.get("summary") or {},
         "upserted_items": upserted_items,
@@ -1107,7 +1119,7 @@ def _render_index_styles() -> str:
       padding: 0;
       background: transparent;
       background-clip: padding-box;
-      # border-bottom: 1px solid rgba(215, 224, 235, 0.96);
+      /* 粘性表头单独由外层壳提供分隔线，这里不再重复画底边。 */
       border-bottom: none;
       position: static;
       top: auto;
@@ -1313,6 +1325,14 @@ def _render_index_styles() -> str:
     }
     .col-email {
       min-width: 260px;
+    }
+    .col-lifecycle {
+      min-width: 108px;
+      white-space: nowrap;
+    }
+    .col-lifecycle .sort-button,
+    td.col-lifecycle {
+      white-space: nowrap;
     }
     .col-reset,
     .col-last-checked {
@@ -2034,7 +2054,7 @@ def _render_index_script(
     const initialDashboardPayload = {initial_dashboard_js};
     const initialProgressPayload = {initial_progress_js};
     const state = {{
-      filter: initialDashboardPayload.filter || "active",
+      filter: "active",
       eventSource: null,
       eventStreamConnected: false,
       reconnectMessageShown: false,
@@ -2045,8 +2065,9 @@ def _render_index_script(
       lastFocusedElement: null,
       sortKey: "last_checked_at_utc",
       sortDirection: "desc",
-      items: [],
+      items: Array.isArray(initialDashboardPayload.items) ? initialDashboardPayload.items : [],
       summary: {{}},
+      dashboardRevision: Number(initialDashboardPayload.accounts_revision || 0),
       lastRenderedMode: ""
     }};
 
@@ -2562,7 +2583,13 @@ def _render_index_script(
     }}
 
     function getEventStreamUrl() {{
-      return withPrefix(`/api/events?filter=${{encodeURIComponent(state.filter)}}`);
+      const params = new URLSearchParams();
+      params.set("filter", "all");
+      if (Number.isFinite(state.dashboardRevision) && state.dashboardRevision > 0) {{
+        params.set("known_accounts_revision", String(state.dashboardRevision));
+        params.set("skip_initial_dashboard", "1");
+      }}
+      return withPrefix(`/api/events?${{params.toString()}}`);
     }}
 
     function parseEventPayload(event) {{
@@ -2576,6 +2603,32 @@ def _render_index_script(
     function areSummaryEqual(left, right) {{
       const keys = ["total", "active", "available", "exhausted", "unknown", "invalid", "source_missing"];
       return keys.every((key) => Number((left && left[key]) ?? 0) === Number((right && right[key]) ?? 0));
+    }}
+
+    function matchesFilter(item, filterName = state.filter) {{
+      const currentFilter = String(filterName || "all");
+      const lifecycleStatus = String((item && item.lifecycle_status) || "");
+      const quotaStatus = String((item && item.quota_status) || "");
+      if (currentFilter === "all") {{
+        return true;
+      }}
+      if (currentFilter === "active") {{
+        return lifecycleStatus === "active";
+      }}
+      if (currentFilter === "available" || currentFilter === "exhausted" || currentFilter === "unknown") {{
+        return lifecycleStatus === "active" && quotaStatus === currentFilter;
+      }}
+      if (currentFilter === "invalid" || currentFilter === "source_missing") {{
+        return lifecycleStatus === currentFilter;
+      }}
+      return true;
+    }}
+
+    function filterItemsByActiveView(items, filterName = state.filter) {{
+      if (!Array.isArray(items) || items.length === 0) {{
+        return [];
+      }}
+      return items.filter((item) => matchesFilter(item, filterName));
     }}
 
     function updateGeneratedAt(value) {{
@@ -2615,6 +2668,7 @@ def _render_index_script(
         return;
       }}
       state.items = Array.isArray(payload.items) ? payload.items : [];
+      state.dashboardRevision = Number(payload.accounts_revision || 0);
       applyDashboardOverview(payload);
       renderRows(state.items);
       renderSortButtons();
@@ -2626,6 +2680,7 @@ def _render_index_script(
       }}
 
       const nextSummary = payload.summary || state.summary || {{}};
+      state.dashboardRevision = Number(payload.accounts_revision || state.dashboardRevision || 0);
       if (!areSummaryEqual(nextSummary, state.summary || {{}})) {{
         renderSummary(nextSummary);
       }}
@@ -2868,7 +2923,8 @@ def _render_index_script(
     function setActiveFilter(filter) {{
       state.filter = filter;
       syncFilterSelectionState();
-      updateTableMeta(Array.isArray(state.items) ? state.items.length : 0);
+      renderRows(state.items);
+      renderSortButtons();
     }}
 
     function prepareDashboardForFilterChange() {{
@@ -3067,15 +3123,16 @@ def _render_index_script(
 
     function renderRows(items) {{
       const tbody = document.getElementById("rows");
-      updateTableMeta(Array.isArray(items) ? items.length : 0);
-      const sortedItems = Array.isArray(items) ? sortItems(items) : [];
+      const visibleItems = filterItemsByActiveView(items, state.filter);
+      updateTableMeta(visibleItems.length);
+      const sortedItems = sortItems(visibleItems);
       const layoutMode = getCurrentLayoutMode();
       state.lastRenderedMode = layoutMode;
 
       if (layoutMode === "mobile") {{
         renderMobileRows(sortedItems);
       }}
-      if (!Array.isArray(items) || items.length === 0) {{
+      if (sortedItems.length === 0) {{
         if (layoutMode !== "mobile") {{
           tbody.innerHTML = '<tr><td colspan="{_TABLE_COLUMN_COUNT}" class="empty">当前筛选下没有账号数据。</td></tr>';
         }}
@@ -3132,9 +3189,11 @@ def _render_index_script(
       if (!button) {{
         return;
       }}
-      setActiveFilter(button.dataset.filter || "all");
-      prepareDashboardForFilterChange();
-      connectEventStream(true);
+      const nextFilter = button.dataset.filter || "all";
+      if (nextFilter === state.filter) {{
+        return;
+      }}
+      setActiveFilter(nextFilter);
     }});
 
     document.getElementById("sticky-filter-list").addEventListener("click", (event) => {{
@@ -3142,9 +3201,11 @@ def _render_index_script(
       if (!button) {{
         return;
       }}
-      setActiveFilter(button.dataset.stickyFilter || "all");
-      prepareDashboardForFilterChange();
-      connectEventStream(true);
+      const nextFilter = button.dataset.stickyFilter || "all";
+      if (nextFilter === state.filter) {{
+        return;
+      }}
+      setActiveFilter(nextFilter);
     }});
 
     document.addEventListener("click", (event) => {{
@@ -3223,9 +3284,8 @@ def _render_index_script(
     }});
 
     // 初始化
-    setActiveFilter(state.filter);
-    applyDashboardOverview(initialDashboardPayload);
-    renderDashboardPlaceholder("正在加载账号数据...");
+    applyDashboardSnapshot(initialDashboardPayload);
+    syncFilterSelectionState();
     applyProgressPayload(initialProgressPayload);
     updateControlButtons(initialProgressPayload);
     window.requestAnimationFrame(syncStickyHeaderLayout);
@@ -3446,6 +3506,22 @@ def create_app(settings: Settings):
         filter_name = query.get("filter", ["all"])[0]
         return filter_name if filter_name in FILTERS else "all"
 
+    def _parse_event_stream_options(query_string: str) -> tuple[str, bool, int]:
+        query = parse_qs(query_string, keep_blank_values=False)
+        filter_name = query.get("filter", ["all"])[0]
+        current_filter = filter_name if filter_name in FILTERS else "all"
+        skip_initial_dashboard = str(query.get("skip_initial_dashboard", ["0"])[0]).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        try:
+            known_accounts_revision = max(int(query.get("known_accounts_revision", ["0"])[0]), 0)
+        except ValueError:
+            known_accounts_revision = 0
+        return current_filter, skip_initial_dashboard, known_accounts_revision
+
     def _build_dashboard_json(current_filter: str) -> bytes:
         revisions = database.fetch_change_state()
         cache_key = ("dashboard", current_filter, int(revisions["accounts_revision"]))
@@ -3474,7 +3550,7 @@ def create_app(settings: Settings):
         def _builder() -> bytes:
             html = render_index_page(
                 settings,
-                initial_dashboard_payload=build_dashboard_overview_payload(settings, "active", database),
+                initial_dashboard_payload=build_dashboard_payload(settings, "all", database),
                 initial_progress_payload=build_progress_payload(settings, database),
             ).encode("utf-8")
             if gzip_enabled and len(html) >= settings.web_gzip_min_bytes:
@@ -3483,14 +3559,25 @@ def create_app(settings: Settings):
 
         return page_cache.get_or_build(cache_key, _builder)
 
-    def _iter_event_stream(current_filter: str):
-        initial_revisions = database.fetch_change_state()
+    def _iter_event_stream(
+        current_filter: str,
+        *,
+        skip_initial_dashboard: bool = False,
+        known_accounts_revision: int = 0,
+    ):
         current_dashboard_payload = build_dashboard_payload(settings, current_filter, database)
         yield f"retry: {EVENT_STREAM_RETRY_MS}\n\n".encode("utf-8")
         yield _encode_sse_event("progress", build_progress_payload(settings, database))
-        yield _encode_sse_event("dashboard", current_dashboard_payload)
+        current_accounts_revision = int(current_dashboard_payload.get("accounts_revision") or 0)
+        if not (
+            skip_initial_dashboard
+            and known_accounts_revision > 0
+            and known_accounts_revision == current_accounts_revision
+        ):
+            yield _encode_sse_event("dashboard", current_dashboard_payload)
 
-        last_accounts_revision = int(initial_revisions["accounts_revision"])
+        initial_revisions = database.fetch_change_state()
+        last_accounts_revision = current_accounts_revision or int(initial_revisions["accounts_revision"])
         last_runtime_revision = int(initial_revisions["runtime_revision"])
         last_dashboard_payload = current_dashboard_payload
         last_keepalive_at = monotonic()
@@ -3608,8 +3695,17 @@ def create_app(settings: Settings):
             )
 
         if path == "/api/events":
-            current_filter = _normalize_filter_from_query(environ.get("QUERY_STRING", ""))
-            return _event_stream_response(start_response, _iter_event_stream(current_filter))
+            current_filter, skip_initial_dashboard, known_accounts_revision = _parse_event_stream_options(
+                environ.get("QUERY_STRING", "")
+            )
+            return _event_stream_response(
+                start_response,
+                _iter_event_stream(
+                    current_filter,
+                    skip_initial_dashboard=skip_initial_dashboard,
+                    known_accounts_revision=known_accounts_revision,
+                ),
+            )
 
         return _text_response(start_response, "404 Not Found", "not found")
 

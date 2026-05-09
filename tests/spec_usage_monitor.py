@@ -610,6 +610,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(payload["summary"]["unknown"], 1)
         self.assertEqual(payload["summary"]["invalid"], 1)
         self.assertEqual(payload["summary"]["source_missing"], 1)
+        self.assertGreaterEqual(payload["accounts_revision"], 1)
         self.assertEqual(len(payload["items"]), 3)
 
         payload_by_email = {item["email"]: item for item in payload["items"]}
@@ -665,6 +666,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         )
 
         payload = build_dashboard_overview_payload(self.settings, "all")
+        self.assertGreaterEqual(payload["accounts_revision"], 1)
         self.assertEqual(payload["filter"], "all")
         self.assertEqual(payload["summary"]["total"], 1)
         self.assertNotIn("items", payload)
@@ -672,6 +674,7 @@ class UsageMonitorTestCase(unittest.TestCase):
     def test_dashboard_patch_payload_tracks_upserts_and_removals(self) -> None:
         previous_payload = {
             "generated_at": "2026-03-18T00:00:00Z",
+            "accounts_revision": 7,
             "filter": "active",
             "summary": {"total": 2, "active": 1, "available": 1, "exhausted": 0, "unknown": 0, "invalid": 1, "source_missing": 0},
             "items": [
@@ -693,6 +696,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         }
         current_payload = {
             "generated_at": "2026-03-18T00:05:00Z",
+            "accounts_revision": 8,
             "filter": "active",
             "summary": {"total": 2, "active": 1, "available": 0, "exhausted": 1, "unknown": 0, "invalid": 1, "source_missing": 0},
             "items": [
@@ -716,6 +720,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         patch_payload = build_dashboard_patch_payload(previous_payload, current_payload)
         self.assertEqual(patch_payload["filter"], "active")
         self.assertEqual(patch_payload["generated_at"], "2026-03-18T00:05:00Z")
+        self.assertEqual(patch_payload["accounts_revision"], 8)
         self.assertEqual(patch_payload["removed_dimension_keys"], ["acct-1::team::user-1"])
         self.assertEqual([item["dimension_key"] for item in patch_payload["upserted_items"]], ["acct-2::team::user-2"])
 
@@ -896,6 +901,84 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertIn("retry: 1500", first_chunk)
         self.assertIn("event: progress", second_chunk)
         self.assertIn("event: dashboard", third_chunk)
+
+    def test_events_api_can_skip_initial_dashboard_when_revision_matches(self) -> None:
+        database = UsageDatabase(self.settings.db_path)
+        database.initialize()
+        database.upsert_account(
+            {
+                "account_id": "acct-1",
+                "email": "one@example.com",
+                "source_file": "/tmp/one.json",
+                "source_mtime_ns": 1,
+                "lifecycle_status": LIFECYCLE_ACTIVE,
+                "quota_status": QUOTA_AVAILABLE,
+                "plan_type": "team",
+                "used_percent": 10.0,
+                "rate_limit_allowed": 1,
+                "rate_limit_reached": 0,
+                "reset_at_utc": "2026-03-18T00:00:00Z",
+                "last_checked_at_utc": "2026-03-18T00:00:00Z",
+                "last_success_at_utc": "2026-03-18T00:00:00Z",
+                "last_http_status": 200,
+                "consecutive_403_count": 0,
+                "invalid_reason_code": None,
+                "invalid_reason_detail": None,
+                "last_error_detail": None,
+                "updated_at_utc": "2026-03-18T00:00:00Z",
+            }
+        )
+        revision = build_dashboard_payload(self.settings, "all", database)["accounts_revision"]
+        short_ping_settings = Settings(
+            project_root=self.settings.project_root,
+            subproject_root=self.settings.subproject_root,
+            tokens_dir=self.settings.tokens_dir,
+            db_path=self.settings.db_path,
+            auth_invalid_dir=self.settings.auth_invalid_dir,
+            url_prefix=self.settings.url_prefix,
+            per_account_interval_seconds=self.settings.per_account_interval_seconds,
+            round_interval_seconds=self.settings.round_interval_seconds,
+            request_timeout_seconds=self.settings.request_timeout_seconds,
+            web_host=self.settings.web_host,
+            web_port=self.settings.web_port,
+            log_level=self.settings.log_level,
+            user_agent=self.settings.user_agent,
+            manual_trigger_poll_seconds=self.settings.manual_trigger_poll_seconds,
+            sse_poll_seconds=0.1,
+            sse_ping_seconds=1.0,
+            web_gzip_min_bytes=self.settings.web_gzip_min_bytes,
+        )
+        app = create_app(short_ping_settings)
+
+        captured: dict[str, object] = {}
+
+        def start_response(status, headers):
+            captured["status"] = status
+            captured["headers"] = headers
+
+        stream = app(
+            {
+                "REQUEST_METHOD": "GET",
+                "PATH_INFO": "/api/events",
+                "QUERY_STRING": f"filter=all&skip_initial_dashboard=1&known_accounts_revision={revision}",
+            },
+            start_response,
+        )
+        iterator = iter(stream)
+        first_chunk = next(iterator).decode("utf-8")
+        second_chunk = next(iterator).decode("utf-8")
+        third_chunk = next(iterator).decode("utf-8")
+        if hasattr(stream, "close"):
+            stream.close()
+
+        self.assertEqual(captured["status"], "200 OK")
+        header_map = dict(captured["headers"])
+        self.assertEqual(header_map["Content-Type"], "text/event-stream; charset=utf-8")
+        self.assertEqual(header_map["X-Accel-Buffering"], "no")
+        self.assertIn("retry: 1500", first_chunk)
+        self.assertIn("event: progress", second_chunk)
+        self.assertIn(": ping", third_chunk)
+        self.assertNotIn("event: dashboard", third_chunk)
 
     def test_dashboard_api_supports_gzip(self) -> None:
         database = UsageDatabase(self.settings.db_path)
@@ -1635,7 +1718,10 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertIn('const urlPrefix = "/usage-monitor";', body)
         self.assertIn("const initialDashboardPayload =", body)
         self.assertIn("const initialProgressPayload =", body)
-        self.assertIn("return withPrefix(`/api/events?filter=${encodeURIComponent(state.filter)}`);", body)
+        self.assertIn('params.set("filter", "all");', body)
+        self.assertIn('params.set("known_accounts_revision", String(state.dashboardRevision));', body)
+        self.assertIn('params.set("skip_initial_dashboard", "1");', body)
+        self.assertIn("return withPrefix(`/api/events?${params.toString()}`);", body)
         self.assertIn("const source = new EventSource(getEventStreamUrl());", body)
         self.assertIn('source.addEventListener("progress"', body)
         self.assertIn('source.addEventListener("dashboard"', body)
@@ -1657,13 +1743,14 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertIn('id="sticky-table-shell"', body)
         self.assertIn('id="sticky-table-head"', body)
         self.assertIn('id="sticky-filter-list"', body)
-        self.assertIn("setActiveFilter(state.filter);", body)
-        self.assertIn("connectEventStream(true);", body)
+        self.assertIn('dashboardRevision: Number(initialDashboardPayload.accounts_revision || 0),', body)
         self.assertIn("connectEventStream(false);", body)
         self.assertIn("function renderMobileRows(items) {", body)
         self.assertIn("function formatUtcToShanghai(value, empty = \"-\") {", body)
         self.assertIn("function applyDashboardPatch(payload) {", body)
         self.assertIn("function renderDashboardPlaceholder(message = \"正在加载账号数据...\") {", body)
+        self.assertIn("function matchesFilter(item, filterName = state.filter) {", body)
+        self.assertIn("function filterItemsByActiveView(items, filterName = state.filter) {", body)
         self.assertIn("function getPlanTagClass(planType) {", body)
         self.assertIn("function renderPlanTag(planType) {", body)
         self.assertIn("function getPlanTypePriority(planType) {", body)
@@ -1685,6 +1772,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertIn('document.querySelectorAll("#summary [data-filter]")', body)
         self.assertIn('document.querySelectorAll("#sticky-filter-list [data-sticky-filter]")', body)
         self.assertIn("syncFilterSelectionState();", body)
+        self.assertIn("applyDashboardSnapshot(initialDashboardPayload);", body)
         self.assertIn('document.getElementById("table-wrap").addEventListener("scroll"', body)
         self.assertIn('document.getElementById("sticky-filter-list").addEventListener("click"', body)
         self.assertIn('class="plan-tag ${getPlanTagClass(normalized)}"', body)
@@ -1696,6 +1784,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertNotIn("loadDashboard()", body)
         self.assertNotIn("loadProgress()", body)
         self.assertNotIn("window.setInterval(loadDashboard", body)
+        self.assertNotIn("prepareDashboardForFilterChange();", body)
         self.assertNotIn("SSE 实时推送", body)
         self.assertNotIn("页面改为 SSE", body)
 
