@@ -2867,9 +2867,8 @@ def _render_index_script(
     // 页面渲染
     function setActiveFilter(filter) {{
       state.filter = filter;
-      document.getElementById("current-filter").textContent = labels.filter[filter] || filter;
+      syncFilterSelectionState();
       updateTableMeta(Array.isArray(state.items) ? state.items.length : 0);
-      renderStickyQuickFilters();
     }}
 
     function prepareDashboardForFilterChange() {{
@@ -2968,6 +2967,23 @@ def _render_index_script(
       }}).join("");
       document.getElementById("summary").innerHTML = html;
       renderStickyQuickFilters(state.summary);
+    }}
+
+    function syncFilterSelectionState() {{
+      const currentFilter = String(state.filter || "all");
+      document.getElementById("current-filter").textContent = labels.filter[currentFilter] || currentFilter;
+
+      document.querySelectorAll("#summary [data-filter]").forEach((button) => {{
+        const active = String(button.dataset.filter || "all") === currentFilter;
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-pressed", active ? "true" : "false");
+      }});
+
+      document.querySelectorAll("#sticky-filter-list [data-sticky-filter]").forEach((button) => {{
+        const active = String(button.dataset.stickyFilter || "all") === currentFilter;
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-pressed", active ? "true" : "false");
+      }});
     }}
 
     function compareNullable(left, right, direction) {{
