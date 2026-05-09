@@ -1,0 +1,7 @@
+.env
+.htpasswd
+data/
+authInvalid/
+tests/
+__pycache__/
+usage_monitor/__pycache__/

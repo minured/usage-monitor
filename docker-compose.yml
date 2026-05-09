@@ -1,0 +1,48 @@
+services:
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "usage_monitor.collector"]
+    environment:
+      USAGE_MONITOR_TOKENS_DIR: /app/tokens
+      USAGE_MONITOR_DB_PATH: /app/usage-monitor/data/usage-monitor.sqlite3
+      USAGE_MONITOR_AUTH_INVALID_DIR: /app/authInvalid
+      USAGE_MONITOR_URL_PREFIX: ${USAGE_MONITOR_URL_PREFIX:-}
+      USAGE_MONITOR_PER_ACCOUNT_INTERVAL_SECONDS: ${USAGE_MONITOR_PER_ACCOUNT_INTERVAL_SECONDS:-2}
+      USAGE_MONITOR_ROUND_INTERVAL_SECONDS: ${USAGE_MONITOR_ROUND_INTERVAL_SECONDS:-300}
+      USAGE_MONITOR_MANUAL_TRIGGER_POLL_SECONDS: ${USAGE_MONITOR_MANUAL_TRIGGER_POLL_SECONDS:-2}
+      USAGE_MONITOR_REQUEST_TIMEOUT_SECONDS: ${USAGE_MONITOR_REQUEST_TIMEOUT_SECONDS:-30}
+      USAGE_MONITOR_LOG_LEVEL: ${USAGE_MONITOR_LOG_LEVEL:-INFO}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-127.0.0.1,localhost,::1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${USAGE_MONITOR_TOKENS_HOST_PATH:-../tokens}:/app/tokens
+      - ${USAGE_MONITOR_DATA_HOST_PATH:-./data}:/app/usage-monitor/data
+      - ${USAGE_MONITOR_AUTH_INVALID_HOST_PATH:-./authInvalid}:/app/authInvalid
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "usage_monitor.web"]
+    environment:
+      USAGE_MONITOR_DB_PATH: /app/usage-monitor/data/usage-monitor.sqlite3
+      USAGE_MONITOR_URL_PREFIX: ${USAGE_MONITOR_URL_PREFIX:-}
+      USAGE_MONITOR_WEB_HOST: 0.0.0.0
+      USAGE_MONITOR_WEB_PORT: ${USAGE_MONITOR_WEB_PORT:-8765}
+      USAGE_MONITOR_LOG_LEVEL: ${USAGE_MONITOR_LOG_LEVEL:-INFO}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-127.0.0.1,localhost,::1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${USAGE_MONITOR_DATA_HOST_PATH:-./data}:/app/usage-monitor/data
+    ports:
+      - "127.0.0.1:${USAGE_MONITOR_WEB_PORT:-8765}:8765"
+    restart: unless-stopped
