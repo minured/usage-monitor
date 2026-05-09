@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import json
 import os
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from usage_monitor.collector import CollectorService
 from usage_monitor.config import DEFAULT_USER_AGENT, Settings
@@ -628,7 +628,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         source_missing_payload = build_dashboard_payload(self.settings, "source_missing")
         self.assertEqual([item["email"] for item in source_missing_payload["items"]], ["a4@example.com"])
 
-    def test_dashboard_api_uses_short_ttl_cache(self) -> None:
+    def test_dashboard_api_cache_refreshes_when_accounts_revision_changes(self) -> None:
         database = UsageDatabase(self.settings.db_path)
         database.initialize()
         database.upsert_account(
@@ -676,37 +676,206 @@ class UsageMonitorTestCase(unittest.TestCase):
             self.assertEqual(captured["status"], "200 OK")
             return json.loads(body)
 
-        with patch("usage_monitor.web.monotonic", side_effect=[100.0, 100.0, 100.1, 101.2, 101.2]):
-            first_payload = request_dashboard()
-            database.upsert_account(
-                {
-                    "account_id": "acct-2",
-                    "email": "two@example.com",
-                    "source_file": "/tmp/two.json",
-                    "source_mtime_ns": 1,
-                    "lifecycle_status": LIFECYCLE_ACTIVE,
-                    "quota_status": QUOTA_AVAILABLE,
-                    "plan_type": "team",
-                    "used_percent": 20.0,
-                    "rate_limit_allowed": 1,
-                    "rate_limit_reached": 0,
-                    "reset_at_utc": "2026-03-18T00:00:00Z",
-                    "last_checked_at_utc": "2026-03-18T00:05:00Z",
-                    "last_success_at_utc": "2026-03-18T00:05:00Z",
-                    "last_http_status": 200,
-                    "consecutive_403_count": 0,
-                    "invalid_reason_code": None,
-                    "invalid_reason_detail": None,
-                    "last_error_detail": None,
-                    "updated_at_utc": "2026-03-18T00:05:00Z",
-                }
-            )
-            second_payload = request_dashboard()
-            third_payload = request_dashboard()
+        first_payload = request_dashboard()
+        database.upsert_account(
+            {
+                "account_id": "acct-2",
+                "email": "two@example.com",
+                "source_file": "/tmp/two.json",
+                "source_mtime_ns": 1,
+                "lifecycle_status": LIFECYCLE_ACTIVE,
+                "quota_status": QUOTA_AVAILABLE,
+                "plan_type": "team",
+                "used_percent": 20.0,
+                "rate_limit_allowed": 1,
+                "rate_limit_reached": 0,
+                "reset_at_utc": "2026-03-18T00:00:00Z",
+                "last_checked_at_utc": "2026-03-18T00:05:00Z",
+                "last_success_at_utc": "2026-03-18T00:05:00Z",
+                "last_http_status": 200,
+                "consecutive_403_count": 0,
+                "invalid_reason_code": None,
+                "invalid_reason_detail": None,
+                "last_error_detail": None,
+                "updated_at_utc": "2026-03-18T00:05:00Z",
+            }
+        )
+        second_payload = request_dashboard()
+        third_payload = request_dashboard()
 
         self.assertEqual(first_payload["summary"]["total"], 1)
-        self.assertEqual(second_payload["summary"]["total"], 1)
+        self.assertEqual(second_payload["summary"]["total"], 2)
         self.assertEqual(third_payload["summary"]["total"], 2)
+
+    def test_change_state_revisions_increment_with_account_and_runtime_updates(self) -> None:
+        database = UsageDatabase(self.settings.db_path)
+        database.initialize()
+
+        initial_state = database.fetch_change_state()
+        self.assertEqual(initial_state["accounts_revision"], 0)
+        self.assertEqual(initial_state["runtime_revision"], 0)
+
+        database.upsert_account(
+            {
+                "account_id": "acct-1",
+                "email": "one@example.com",
+                "source_file": "/tmp/one.json",
+                "source_mtime_ns": 1,
+                "lifecycle_status": LIFECYCLE_ACTIVE,
+                "quota_status": QUOTA_AVAILABLE,
+                "plan_type": "team",
+                "used_percent": 10.0,
+                "rate_limit_allowed": 1,
+                "rate_limit_reached": 0,
+                "reset_at_utc": "2026-03-18T00:00:00Z",
+                "last_checked_at_utc": "2026-03-18T00:00:00Z",
+                "last_success_at_utc": "2026-03-18T00:00:00Z",
+                "last_http_status": 200,
+                "consecutive_403_count": 0,
+                "invalid_reason_code": None,
+                "invalid_reason_detail": None,
+                "last_error_detail": None,
+                "updated_at_utc": "2026-03-18T00:00:00Z",
+            }
+        )
+        after_account = database.fetch_change_state()
+        self.assertGreater(after_account["accounts_revision"], initial_state["accounts_revision"])
+        self.assertEqual(after_account["runtime_revision"], initial_state["runtime_revision"])
+
+        runtime = database.runtime_defaults()
+        runtime.update({"phase": COLLECTOR_PHASE_QUERYING})
+        database.upsert_runtime(runtime)
+        after_runtime = database.fetch_change_state()
+        self.assertEqual(after_runtime["accounts_revision"], after_account["accounts_revision"])
+        self.assertGreater(after_runtime["runtime_revision"], after_account["runtime_revision"])
+
+    def test_events_api_returns_sse_snapshot(self) -> None:
+        database = UsageDatabase(self.settings.db_path)
+        database.initialize()
+        database.upsert_account(
+            {
+                "account_id": "acct-1",
+                "email": "one@example.com",
+                "source_file": "/tmp/one.json",
+                "source_mtime_ns": 1,
+                "lifecycle_status": LIFECYCLE_ACTIVE,
+                "quota_status": QUOTA_AVAILABLE,
+                "plan_type": "team",
+                "used_percent": 10.0,
+                "rate_limit_allowed": 1,
+                "rate_limit_reached": 0,
+                "reset_at_utc": "2026-03-18T00:00:00Z",
+                "last_checked_at_utc": "2026-03-18T00:00:00Z",
+                "last_success_at_utc": "2026-03-18T00:00:00Z",
+                "last_http_status": 200,
+                "consecutive_403_count": 0,
+                "invalid_reason_code": None,
+                "invalid_reason_detail": None,
+                "last_error_detail": None,
+                "updated_at_utc": "2026-03-18T00:00:00Z",
+            }
+        )
+        app = create_app(self.settings)
+
+        captured: dict[str, object] = {}
+
+        def start_response(status, headers):
+            captured["status"] = status
+            captured["headers"] = headers
+
+        stream = app(
+            {
+                "REQUEST_METHOD": "GET",
+                "PATH_INFO": "/api/events",
+                "QUERY_STRING": "filter=all",
+            },
+            start_response,
+        )
+        iterator = iter(stream)
+        first_chunk = next(iterator).decode("utf-8")
+        second_chunk = next(iterator).decode("utf-8")
+        third_chunk = next(iterator).decode("utf-8")
+        if hasattr(stream, "close"):
+            stream.close()
+
+        self.assertEqual(captured["status"], "200 OK")
+        header_map = dict(captured["headers"])
+        self.assertEqual(header_map["Content-Type"], "text/event-stream; charset=utf-8")
+        self.assertEqual(header_map["X-Accel-Buffering"], "no")
+        self.assertIn("retry: 1500", first_chunk)
+        self.assertIn("event: progress", second_chunk)
+        self.assertIn("event: dashboard", third_chunk)
+
+    def test_dashboard_api_supports_gzip(self) -> None:
+        database = UsageDatabase(self.settings.db_path)
+        database.initialize()
+        database.upsert_account(
+            {
+                "account_id": "acct-1",
+                "email": "one@example.com",
+                "source_file": "/tmp/one.json",
+                "source_mtime_ns": 1,
+                "lifecycle_status": LIFECYCLE_ACTIVE,
+                "quota_status": QUOTA_AVAILABLE,
+                "plan_type": "team",
+                "used_percent": 10.0,
+                "rate_limit_allowed": 1,
+                "rate_limit_reached": 0,
+                "reset_at_utc": "2026-03-18T00:00:00Z",
+                "last_checked_at_utc": "2026-03-18T00:00:00Z",
+                "last_success_at_utc": "2026-03-18T00:00:00Z",
+                "last_http_status": 200,
+                "consecutive_403_count": 0,
+                "invalid_reason_code": None,
+                "invalid_reason_detail": None,
+                "last_error_detail": None,
+                "updated_at_utc": "2026-03-18T00:00:00Z",
+            }
+        )
+        gzip_settings = Settings(
+            project_root=self.settings.project_root,
+            subproject_root=self.settings.subproject_root,
+            tokens_dir=self.settings.tokens_dir,
+            db_path=self.settings.db_path,
+            auth_invalid_dir=self.settings.auth_invalid_dir,
+            url_prefix=self.settings.url_prefix,
+            per_account_interval_seconds=self.settings.per_account_interval_seconds,
+            round_interval_seconds=self.settings.round_interval_seconds,
+            request_timeout_seconds=self.settings.request_timeout_seconds,
+            web_host=self.settings.web_host,
+            web_port=self.settings.web_port,
+            log_level=self.settings.log_level,
+            user_agent=self.settings.user_agent,
+            manual_trigger_poll_seconds=self.settings.manual_trigger_poll_seconds,
+            sse_poll_seconds=self.settings.sse_poll_seconds,
+            sse_ping_seconds=self.settings.sse_ping_seconds,
+            web_gzip_min_bytes=1,
+        )
+        app = create_app(gzip_settings)
+
+        captured: dict[str, object] = {}
+
+        def start_response(status, headers):
+            captured["status"] = status
+            captured["headers"] = headers
+
+        body = b"".join(
+            app(
+                {
+                    "REQUEST_METHOD": "GET",
+                    "PATH_INFO": "/api/dashboard",
+                    "QUERY_STRING": "filter=all",
+                    "HTTP_ACCEPT_ENCODING": "gzip, deflate",
+                },
+                start_response,
+            )
+        )
+        header_map = dict(captured["headers"])
+
+        self.assertEqual(captured["status"], "200 OK")
+        self.assertEqual(header_map["Content-Encoding"], "gzip")
+        payload = json.loads(gzip.decompress(body).decode("utf-8"))
+        self.assertEqual(payload["summary"]["total"], 1)
 
     def test_initialize_migrates_legacy_account_id_primary_key(self) -> None:
         conn = sqlite3.connect(self.settings.db_path)
@@ -1371,8 +1540,12 @@ class UsageMonitorTestCase(unittest.TestCase):
 
         self.assertEqual(captured["status"], "200 OK")
         self.assertIn('const urlPrefix = "/usage-monitor";', body)
-        self.assertIn("withPrefix(`/api/dashboard?filter=${encodeURIComponent(state.filter)}`)", body)
-        self.assertIn('const url = withPrefix("/api/progress");', body)
+        self.assertIn("const initialDashboardPayload =", body)
+        self.assertIn("const initialProgressPayload =", body)
+        self.assertIn("return withPrefix(`/api/events?filter=${encodeURIComponent(state.filter)}`);", body)
+        self.assertIn("const source = new EventSource(getEventStreamUrl());", body)
+        self.assertIn('source.addEventListener("progress"', body)
+        self.assertIn('source.addEventListener("dashboard"', body)
         self.assertIn('"/api/scan"', body)
         self.assertIn('"/api/scan/stop"', body)
         self.assertIn('id="scan-stop-button"', body)
@@ -1390,10 +1563,9 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertIn('id="sticky-table-shell"', body)
         self.assertIn('id="sticky-table-head"', body)
         self.assertIn('id="sticky-filter-list"', body)
-        self.assertIn('filter: "active"', body)
-        self.assertIn('setActiveFilter("active");', body)
-        self.assertIn("const CONTROL_ACTION_FOLLOW_UP_MS = 10_000;", body)
-        self.assertIn("beginControlFollowUp(action);", body)
+        self.assertIn("setActiveFilter(state.filter);", body)
+        self.assertIn("connectEventStream(true);", body)
+        self.assertIn("connectEventStream(false);", body)
         self.assertIn("function renderMobileRows(items) {", body)
         self.assertIn("function getPlanTagClass(planType) {", body)
         self.assertIn("function renderPlanTag(planType) {", body)
@@ -1420,6 +1592,9 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertNotIn('data-label="主额度"', body)
         self.assertNotIn('class="cell-secondary mono">${{escapeHtml(item.account_id || "-")}} ·', body)
         self.assertNotIn('class="cell-secondary is-truncate">${{escapeHtml(item.source_file || "-")}}</div>', body)
+        self.assertNotIn("loadDashboard()", body)
+        self.assertNotIn("loadProgress()", body)
+        self.assertNotIn("window.setInterval(loadDashboard", body)
 
 
 if __name__ == "__main__":

@@ -99,6 +99,9 @@ class Settings:
     log_level: str
     user_agent: str = DEFAULT_USER_AGENT
     manual_trigger_poll_seconds: float = 2.0
+    sse_poll_seconds: float = 0.5
+    sse_ping_seconds: float = 15.0
+    web_gzip_min_bytes: int = 1024
 
 
 def load_settings() -> Settings:
@@ -158,5 +161,23 @@ def load_settings() -> Settings:
             default=2.0,
             dotenv_values=dotenv_values,
             minimum=0.2,
+        ),
+        sse_poll_seconds=_env_float(
+            "USAGE_MONITOR_SSE_POLL_SECONDS",
+            default=0.5,
+            dotenv_values=dotenv_values,
+            minimum=0.1,
+        ),
+        sse_ping_seconds=_env_float(
+            "USAGE_MONITOR_SSE_PING_SECONDS",
+            default=15.0,
+            dotenv_values=dotenv_values,
+            minimum=1.0,
+        ),
+        web_gzip_min_bytes=_env_int(
+            "USAGE_MONITOR_WEB_GZIP_MIN_BYTES",
+            default=1024,
+            dotenv_values=dotenv_values,
+            minimum=0,
         ),
     )

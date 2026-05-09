@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import threading
 from socketserver import ThreadingMixIn
-from time import monotonic
+from time import monotonic, sleep
 from typing import Any, Callable
 from urllib.parse import parse_qs
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
@@ -26,9 +27,7 @@ from .timeutil import format_shanghai, utc_now_iso
 
 
 logger = logging.getLogger("usage_monitor.web")
-AUTO_REFRESH_MS = 30_000
 PROGRESS_DEFAULT_POLL_MS = 15_000
-PROGRESS_HIDDEN_POLL_MS = 60_000
 PROGRESS_CONTROL_PENDING_POLL_MS = 1_000
 PROGRESS_POLL_INTERVALS = {
     COLLECTOR_PHASE_IDLE: 15_000,
@@ -38,10 +37,8 @@ PROGRESS_POLL_INTERVALS = {
     COLLECTOR_PHASE_SLEEPING: 30_000,
     COLLECTOR_PHASE_ERROR: 15_000,
 }
-# dashboard 列表体积较大，连续切换筛选时允许 1 秒内复用同一份结果。
-DASHBOARD_CACHE_TTL_SECONDS = 1.0
-# progress 需要更及时，缓存时间更短，避免顶部进度明显滞后。
-PROGRESS_CACHE_TTL_SECONDS = 0.5
+EVENT_STREAM_RETRY_MS = 1_500
+EVENT_STREAM_KEEPALIVE_SECONDS = 20.0
 
 
 class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
@@ -53,42 +50,38 @@ class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
 class _JsonCacheEntry:
     """JSON 响应缓存项。"""
 
-    __slots__ = ("expires_at", "body")
+    __slots__ = ("body",)
 
-    def __init__(self, *, expires_at: float, body: bytes):
-        self.expires_at = expires_at
+    def __init__(self, *, body: bytes):
         self.body = body
 
 
 class _JsonResponseCache:
-    """进程内短 TTL JSON 缓存，减少高频重复查询与重复序列化。"""
+    """进程内小型 JSON 缓存，按修订号复用已编码响应。"""
 
-    def __init__(self) -> None:
+    def __init__(self, max_entries: int = 16) -> None:
         self._entries: dict[tuple[Any, ...], _JsonCacheEntry] = {}
         self._lock = threading.Lock()
+        self._max_entries = max(max_entries, 1)
 
     def get_or_build(
         self,
         key: tuple[Any, ...],
-        ttl_seconds: float,
         builder: Callable[[], bytes],
     ) -> bytes:
-        if ttl_seconds <= 0:
-            return builder()
-
-        now = monotonic()
         with self._lock:
             entry = self._entries.get(key)
-            if entry is not None and entry.expires_at > now:
+            if entry is not None:
                 return entry.body
 
         body = builder()
-        now = monotonic()
         with self._lock:
             entry = self._entries.get(key)
-            if entry is not None and entry.expires_at > now:
+            if entry is not None:
                 return entry.body
-            self._entries[key] = _JsonCacheEntry(expires_at=now + ttl_seconds, body=body)
+            if len(self._entries) >= self._max_entries:
+                self._entries.clear()
+            self._entries[key] = _JsonCacheEntry(body=body)
         return body
 
     def clear(self) -> None:
@@ -1815,7 +1808,7 @@ def _render_index_styles() -> str:
   """.strip()
 
 
-def _render_index_header(refresh_seconds: int) -> str:
+def _render_index_header() -> str:
     return f"""
     <div class="page-header">
       <a href="#accounts-panel" class="skip-link">跳到账号列表</a>
@@ -1824,7 +1817,7 @@ def _render_index_header(refresh_seconds: int) -> str:
         <div class="title-group">
           <div class="eyebrow">Operations Dashboard</div>
           <h1 class="title">usage-monitor</h1>
-          <p class="subtitle">定时采集账号主额度状态，列表默认每 {refresh_seconds} 秒自动刷新；支持手动开始下一轮和安全停止本轮，两个动作都需要二次确认。</p>
+          <p class="subtitle">定时采集账号主额度状态，页面改为 SSE 实时推送；支持手动开始下一轮和安全停止本轮，两个动作都需要二次确认。</p>
         </div>
         <div class="meta-panel" aria-label="页面状态">
           <div class="meta-item">
@@ -1847,7 +1840,7 @@ def _render_index_header(refresh_seconds: int) -> str:
               <div class="section-kicker">Collector Runtime</div>
               <div class="progress-title-row">
                 <div class="card-label">本轮进度</div>
-                <div class="progress-refresh-hint">按阶段自适应刷新</div>
+                <div class="progress-refresh-hint">SSE 实时推送</div>
               </div>
             </div>
             <div class="progress-head-actions">
@@ -1993,29 +1986,31 @@ def _render_index_script(
     lifecycle_order_js: str,
     quota_order_js: str,
     url_prefix_js: str,
+    initial_dashboard_js: str,
+    initial_progress_js: str,
 ) -> str:
     return f"""
-    const CONTROL_ACTION_POLL_MS = {PROGRESS_CONTROL_PENDING_POLL_MS};
-    const CONTROL_ACTION_FOLLOW_UP_MS = 10_000;
     const STICKY_TABLE_TOP = 0;
     const TABLE_CARD_BREAKPOINT = 900;
+    const MOBILE_LAYOUT_BREAKPOINT = 768;
     const STICKY_QUICK_FILTERS = ["all", "active", "available", "exhausted", "invalid"];
+    const initialDashboardPayload = {initial_dashboard_js};
+    const initialProgressPayload = {initial_progress_js};
     const state = {{
-      filter: "active",
-      dashboardTimer: null,
-      progressTimer: null,
-      progressPollMs: {PROGRESS_DEFAULT_POLL_MS},
-      lastProgressPhase: "",
-      lastProgressPayload: null,
+      filter: initialDashboardPayload.filter || "active",
+      eventSource: null,
+      eventStreamConnected: false,
+      reconnectMessageShown: false,
+      lastProgressPhase: String(initialProgressPayload.phase || ""),
+      lastProgressPayload: initialProgressPayload,
       controlRequestInFlight: "",
-      controlFollowUpAction: "",
-      controlFollowUpUntil: 0,
       confirmResolver: null,
       lastFocusedElement: null,
       sortKey: "last_checked_at_utc",
       sortDirection: "desc",
-      items: [],
-      summary: {{}}
+      items: Array.isArray(initialDashboardPayload.items) ? initialDashboardPayload.items : [],
+      summary: initialDashboardPayload.summary || {{}},
+      lastRenderedMode: ""
     }};
 
     // 常量与标签
@@ -2135,14 +2130,6 @@ def _render_index_script(
 
     function withPrefix(path) {{
       return `${{urlPrefix}}${{path}}`;
-    }}
-
-    function normalizePollInterval(value, fallback = {PROGRESS_DEFAULT_POLL_MS}) {{
-      const parsed = Number(value);
-      if (!Number.isFinite(parsed) || parsed < 1000) {{
-        return fallback;
-      }}
-      return Math.round(parsed);
     }}
 
     function formatProgressPercent(value) {{
@@ -2469,81 +2456,120 @@ def _render_index_script(
       }});
     }}
 
-    // 控制动作与轮询
-    function isRunningPhase(phase) {{
-      return ["scanning", "querying", "reconciling"].includes(String(phase || ""));
-    }}
-
-    function beginControlFollowUp(action) {{
-      state.controlFollowUpAction = String(action || "");
-      state.controlFollowUpUntil = Date.now() + CONTROL_ACTION_FOLLOW_UP_MS;
-    }}
-
-    function clearControlFollowUp() {{
-      state.controlFollowUpAction = "";
-      state.controlFollowUpUntil = 0;
-    }}
-
-    function isControlFollowUpActive(payload = null) {{
-      const action = state.controlFollowUpAction;
-      if (!action) {{
-        return false;
+    // 控制动作与实时推送
+    function setDashboardBusy(isBusy) {{
+      const busy = isBusy ? "true" : "false";
+      const tableWrap = document.getElementById("table-wrap");
+      const mobileListWrap = document.getElementById("mobile-list-wrap");
+      tableWrap.setAttribute("aria-busy", busy);
+      if (mobileListWrap) {{
+        mobileListWrap.setAttribute("aria-busy", busy);
       }}
-
-      const now = Date.now();
-      const phase = String((payload && payload.phase) || state.lastProgressPhase || "");
-
-      if (action === "start") {{
-        if (isRunningPhase(phase)) {{
-          return false;
-        }}
-        if (payload && payload.manual_trigger_pending) {{
-          return true;
-        }}
-        return now < state.controlFollowUpUntil;
-      }}
-
-      if (action === "stop") {{
-        if (payload && payload.manual_stop_pending) {{
-          return true;
-        }}
-        if (!payload) {{
-          return now < state.controlFollowUpUntil;
-        }}
-        if (!isRunningPhase(phase)) {{
-          return false;
-        }}
-        return now < state.controlFollowUpUntil;
-      }}
-
-      return false;
     }}
 
-    function syncControlFollowUp(payload = null) {{
-      if (!state.controlFollowUpAction) {{
+    function getCurrentLayoutMode() {{
+      return window.innerWidth <= MOBILE_LAYOUT_BREAKPOINT ? "mobile" : "desktop";
+    }}
+
+    function closeEventStream() {{
+      if (!state.eventSource) {{
         return;
       }}
-      if (!isControlFollowUpActive(payload)) {{
-        clearControlFollowUp();
+      state.eventSource.close();
+      state.eventSource = null;
+      state.eventStreamConnected = false;
+    }}
+
+    function getEventStreamUrl() {{
+      return withPrefix(`/api/events?filter=${{encodeURIComponent(state.filter)}}`);
+    }}
+
+    function parseEventPayload(event) {{
+      try {{
+        return JSON.parse(event.data || "{{}}");
+      }} catch (_error) {{
+        return null;
       }}
     }}
 
-    function getEffectiveProgressPollMs(payload = null) {{
-      const fallback = state.progressPollMs || {PROGRESS_DEFAULT_POLL_MS};
-      const payloadPollMs =
-        payload && Object.prototype.hasOwnProperty.call(payload, "poll_interval_ms")
-          ? payload.poll_interval_ms
-          : fallback;
-      const normalized = normalizePollInterval(payloadPollMs, {PROGRESS_DEFAULT_POLL_MS});
+    function applyDashboardPayload(payload) {{
+      if (!payload || typeof payload !== "object") {{
+        return;
+      }}
+      state.items = Array.isArray(payload.items) ? payload.items : [];
+      renderSummary(payload.summary || {{}});
+      renderRows(state.items);
+      renderSortButtons();
+      document.getElementById("generated-at").textContent = payload.generated_at_shanghai || payload.generated_at || "-";
+      showError("");
+      setDashboardBusy(false);
+    }}
 
-      if (!state.controlFollowUpAction) {{
-        return normalized;
+    function applyProgressPayload(payload) {{
+      if (!payload || typeof payload !== "object") {{
+        return;
       }}
-      if (isControlFollowUpActive(payload)) {{
-        return Math.min(normalized, CONTROL_ACTION_POLL_MS);
+      renderProgress(payload);
+      state.lastProgressPhase = String(payload.phase || "idle");
+      state.lastProgressPayload = payload;
+    }}
+
+    function connectEventStream(showBusy = false) {{
+      if (typeof window.EventSource !== "function") {{
+        showError("当前浏览器不支持 SSE 实时推送。");
+        return;
       }}
-      clearControlFollowUp();
-      return normalized;
+
+      closeEventStream();
+      if (showBusy) {{
+        setDashboardBusy(true);
+      }}
+
+      const source = new EventSource(getEventStreamUrl());
+      state.eventSource = source;
+
+      source.addEventListener("open", () => {{
+        if (state.eventSource !== source) {{
+          return;
+        }}
+        state.eventStreamConnected = true;
+        state.reconnectMessageShown = false;
+        showError("");
+      }});
+
+      source.addEventListener("progress", (event) => {{
+        if (state.eventSource !== source) {{
+          return;
+        }}
+        const payload = parseEventPayload(event);
+        if (!payload) {{
+          return;
+        }}
+        applyProgressPayload(payload);
+      }});
+
+      source.addEventListener("dashboard", (event) => {{
+        if (state.eventSource !== source) {{
+          return;
+        }}
+        const payload = parseEventPayload(event);
+        if (!payload) {{
+          return;
+        }}
+        applyDashboardPayload(payload);
+      }});
+
+      source.onerror = () => {{
+        if (state.eventSource !== source) {{
+          return;
+        }}
+        state.eventStreamConnected = false;
+        setDashboardBusy(false);
+        if (!state.reconnectMessageShown) {{
+          showError("SSE 连接中断，正在自动重连...");
+          state.reconnectMessageShown = true;
+        }}
+      }};
     }}
 
     function updateControlButtons(payload, preserveNote = false) {{
@@ -2663,14 +2689,7 @@ def _render_index_script(
             ...(state.lastProgressPayload || {{ phase: state.lastProgressPhase || "idle" }}),
             ...payload
           }};
-          if (response.status === 202) {{
-            beginControlFollowUp(action);
-          }}
-          if (response.status === 202 || action === "stop") {{
-            await loadProgress();
-          }} else {{
-            updateControlButtons(state.lastProgressPayload, true);
-          }}
+          updateControlButtons(state.lastProgressPayload, true);
           return;
         }}
         throw new Error(payload.message || `操作失败: ${{response.status}}`);
@@ -2681,16 +2700,6 @@ def _render_index_script(
         state.controlRequestInFlight = "";
         updateControlButtons(state.lastProgressPayload || {{ phase: state.lastProgressPhase || "idle" }}, preserveNote);
       }}
-    }}
-
-    function scheduleProgressRefresh(delayMs = state.progressPollMs) {{
-      if (state.progressTimer) {{
-        window.clearTimeout(state.progressTimer);
-      }}
-      const nextDelay = document.hidden
-        ? Math.max(normalizePollInterval(delayMs), {PROGRESS_HIDDEN_POLL_MS})
-        : normalizePollInterval(delayMs);
-      state.progressTimer = window.setTimeout(loadProgress, nextDelay);
     }}
 
     // 页面渲染
@@ -2876,9 +2885,21 @@ def _render_index_script(
       const tbody = document.getElementById("rows");
       updateTableMeta(Array.isArray(items) ? items.length : 0);
       const sortedItems = Array.isArray(items) ? sortItems(items) : [];
-      renderMobileRows(sortedItems);
+      const layoutMode = getCurrentLayoutMode();
+      state.lastRenderedMode = layoutMode;
+
+      if (layoutMode === "mobile") {{
+        renderMobileRows(sortedItems);
+      }}
       if (!Array.isArray(items) || items.length === 0) {{
-        tbody.innerHTML = '<tr><td colspan="{_TABLE_COLUMN_COUNT}" class="empty">当前筛选下没有账号数据。</td></tr>';
+        if (layoutMode !== "mobile") {{
+          tbody.innerHTML = '<tr><td colspan="{_TABLE_COLUMN_COUNT}" class="empty">当前筛选下没有账号数据。</td></tr>';
+        }}
+        window.requestAnimationFrame(syncStickyHeaderLayout);
+        return;
+      }}
+
+      if (layoutMode === "mobile") {{
         window.requestAnimationFrame(syncStickyHeaderLayout);
         return;
       }}
@@ -2921,67 +2942,6 @@ def _render_index_script(
       banner.textContent = message || "";
     }}
 
-    // 数据加载
-    async function loadDashboard() {{
-      const tableWrap = document.getElementById("table-wrap");
-      const mobileListWrap = document.getElementById("mobile-list-wrap");
-      tableWrap.setAttribute("aria-busy", "true");
-      if (mobileListWrap) {{
-        mobileListWrap.setAttribute("aria-busy", "true");
-      }}
-      const url = withPrefix(`/api/dashboard?filter=${{encodeURIComponent(state.filter)}}`);
-      try {{
-        const response = await fetch(url, {{ cache: "no-store" }});
-        if (!response.ok) {{
-          throw new Error(`请求失败: ${{response.status}}`);
-        }}
-        const payload = await response.json();
-        state.items = Array.isArray(payload.items) ? payload.items : [];
-        renderSummary(payload.summary || {{}});
-        renderRows(state.items);
-        renderSortButtons();
-        document.getElementById("generated-at").textContent = payload.generated_at_shanghai || payload.generated_at || "-";
-        showError("");
-      }} catch (error) {{
-        showError(error.message || "加载失败");
-      }} finally {{
-        tableWrap.setAttribute("aria-busy", "false");
-        if (mobileListWrap) {{
-          mobileListWrap.setAttribute("aria-busy", "false");
-        }}
-      }}
-    }}
-
-    async function loadProgress() {{
-      const url = withPrefix("/api/progress");
-      try {{
-        const response = await fetch(url, {{ cache: "no-store" }});
-        if (!response.ok) {{
-          throw new Error(`进度请求失败: ${{response.status}}`);
-        }}
-        const payload = await response.json();
-        const previousPhase = state.lastProgressPhase;
-        renderProgress(payload);
-        state.lastProgressPhase = String(payload.phase || "idle");
-        syncControlFollowUp(payload);
-        if (
-          previousPhase &&
-          previousPhase !== state.lastProgressPhase &&
-          isRunningPhase(previousPhase) &&
-          ["idle", "sleeping", "error"].includes(state.lastProgressPhase)
-        ) {{
-          loadDashboard();
-        }}
-        state.progressPollMs = normalizePollInterval(payload.poll_interval_ms, {PROGRESS_DEFAULT_POLL_MS});
-        scheduleProgressRefresh(getEffectiveProgressPollMs(payload));
-      }} catch (error) {{
-        setProgressNote(error.message || "进度加载失败", true);
-        scheduleProgressRefresh(
-          getEffectiveProgressPollMs(state.lastProgressPayload || {{ poll_interval_ms: state.progressPollMs }})
-        );
-      }}
-    }}
-
     // 事件绑定
     document.getElementById("summary").addEventListener("click", (event) => {{
       const button = event.target.closest("[data-filter]");
@@ -2989,7 +2949,7 @@ def _render_index_script(
         return;
       }}
       setActiveFilter(button.dataset.filter || "all");
-      loadDashboard();
+      connectEventStream(true);
     }});
 
     document.getElementById("sticky-filter-list").addEventListener("click", (event) => {{
@@ -2998,7 +2958,7 @@ def _render_index_script(
         return;
       }}
       setActiveFilter(button.dataset.stickyFilter || "all");
-      loadDashboard();
+      connectEventStream(true);
     }});
 
     document.addEventListener("click", (event) => {{
@@ -3048,14 +3008,6 @@ def _render_index_script(
       }}
     }});
 
-    document.addEventListener("visibilitychange", () => {{
-      if (document.hidden) {{
-        scheduleProgressRefresh(state.progressPollMs);
-        return;
-      }}
-      loadProgress();
-    }});
-
     document.getElementById("table-wrap").addEventListener("scroll", () => {{
       syncStickyHeaderScroll();
     }});
@@ -3071,26 +3023,40 @@ def _render_index_script(
     window.addEventListener(
       "resize",
       () => {{
+        if (state.lastRenderedMode && state.lastRenderedMode !== getCurrentLayoutMode()) {{
+          renderRows(state.items);
+          renderSortButtons();
+        }}
         syncStickyHeaderLayout();
       }},
       {{ passive: true }}
     );
 
+    window.addEventListener("beforeunload", () => {{
+      closeEventStream();
+    }});
+
     // 初始化
-    setActiveFilter("active");
-    renderStickyQuickFilters();
-    loadDashboard();
-    loadProgress();
+    setActiveFilter(state.filter);
+    applyDashboardPayload(initialDashboardPayload);
+    applyProgressPayload(initialProgressPayload);
+    updateControlButtons(initialProgressPayload);
     window.requestAnimationFrame(syncStickyHeaderLayout);
-    state.dashboardTimer = window.setInterval(loadDashboard, {AUTO_REFRESH_MS});
+    connectEventStream(false);
   """.strip()
 
 
-def render_index_page(settings: Settings) -> str:
-    refresh_seconds = AUTO_REFRESH_MS // 1000
+def render_index_page(
+    settings: Settings,
+    *,
+    initial_dashboard_payload: dict[str, Any],
+    initial_progress_payload: dict[str, Any],
+) -> str:
     lifecycle_order_js = json.dumps(_LIFECYCLE_ORDER, ensure_ascii=False)
     quota_order_js = json.dumps(_QUOTA_ORDER, ensure_ascii=False)
     url_prefix_js = json.dumps(settings.url_prefix, ensure_ascii=False)
+    initial_dashboard_js = _encode_json_for_script(initial_dashboard_payload)
+    initial_progress_js = _encode_json_for_script(initial_progress_payload)
     table_header_row = _render_table_header_row()
 
     return f"""<!doctype html>
@@ -3105,7 +3071,7 @@ def render_index_page(settings: Settings) -> str:
 </head>
 <body>
   <main class="page">
-{_render_index_header(refresh_seconds)}
+{_render_index_header()}
 {_render_index_table(table_header_row)}
   </main>
 
@@ -3116,6 +3082,8 @@ def render_index_page(settings: Settings) -> str:
     lifecycle_order_js=lifecycle_order_js,
     quota_order_js=quota_order_js,
     url_prefix_js=url_prefix_js,
+    initial_dashboard_js=initial_dashboard_js,
+    initial_progress_js=initial_progress_js,
 )}
   </script>
 </body>
@@ -3123,25 +3091,88 @@ def render_index_page(settings: Settings) -> str:
 """
 
 
-def _json_response(start_response: Any, status: str, payload: dict[str, Any]) -> list[bytes]:
+def _encode_json_for_script(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
+
+
+def _json_response(
+    start_response: Any,
+    status: str,
+    payload: dict[str, Any],
+    *,
+    environ: dict[str, Any] | None = None,
+    settings: Settings | None = None,
+) -> list[bytes]:
     body = _encode_json_body(payload)
-    return _json_bytes_response(start_response, status, body)
+    return _json_bytes_response(
+        start_response,
+        status,
+        body,
+        environ=environ,
+        settings=settings,
+    )
 
 
 def _encode_json_body(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def _json_bytes_response(start_response: Any, status: str, body: bytes) -> list[bytes]:
+def _accepts_gzip(environ: dict[str, Any] | None) -> bool:
+    if not environ:
+        return False
+    return "gzip" in str(environ.get("HTTP_ACCEPT_ENCODING", "")).lower()
+
+
+def _maybe_compress_body(
+    *,
+    environ: dict[str, Any] | None,
+    settings: Settings | None,
+    content_type: str,
+    body: bytes,
+) -> tuple[bytes, list[tuple[str, str]]]:
+    gzip_min_bytes = settings.web_gzip_min_bytes if settings is not None else 1024
+    if (
+        gzip_min_bytes <= 0
+        or len(body) < gzip_min_bytes
+        or not _accepts_gzip(environ)
+        or not (
+            content_type.startswith("application/json")
+            or content_type.startswith("text/html")
+        )
+    ):
+        return body, []
+
+    compressed = gzip.compress(body, compresslevel=1)
+    return compressed, [
+        ("Content-Encoding", "gzip"),
+        ("Vary", "Accept-Encoding"),
+    ]
+
+
+def _json_bytes_response(
+    start_response: Any,
+    status: str,
+    body: bytes,
+    *,
+    environ: dict[str, Any] | None = None,
+    settings: Settings | None = None,
+) -> list[bytes]:
+    response_body, extra_headers = _maybe_compress_body(
+        environ=environ,
+        settings=settings,
+        content_type="application/json; charset=utf-8",
+        body=body,
+    )
     start_response(
         status,
         [
             ("Content-Type", "application/json; charset=utf-8"),
             ("Cache-Control", "no-store"),
-            ("Content-Length", str(len(body))),
+            *extra_headers,
+            ("Content-Length", str(len(response_body))),
         ],
     )
-    return [body]
+    return [response_body]
 
 
 def _text_response(start_response: Any, status: str, text: str) -> list[bytes]:
@@ -3156,29 +3187,162 @@ def _text_response(start_response: Any, status: str, text: str) -> list[bytes]:
     return [body]
 
 
-def _html_response(start_response: Any, html: str) -> list[bytes]:
-    return _html_bytes_response(start_response, html.encode("utf-8"))
+def _html_response(
+    start_response: Any,
+    html: str,
+    *,
+    environ: dict[str, Any] | None = None,
+    settings: Settings | None = None,
+) -> list[bytes]:
+    return _html_bytes_response(
+        start_response,
+        html.encode("utf-8"),
+        environ=environ,
+        settings=settings,
+    )
 
 
-def _html_bytes_response(start_response: Any, body: bytes) -> list[bytes]:
+def _html_bytes_response(
+    start_response: Any,
+    body: bytes,
+    *,
+    environ: dict[str, Any] | None = None,
+    settings: Settings | None = None,
+) -> list[bytes]:
+    response_body, extra_headers = _maybe_compress_body(
+        environ=environ,
+        settings=settings,
+        content_type="text/html; charset=utf-8",
+        body=body,
+    )
     start_response(
         "200 OK",
         [
             ("Content-Type", "text/html; charset=utf-8"),
             ("Cache-Control", "no-store"),
-            ("Content-Length", str(len(body))),
+            *extra_headers,
+            ("Content-Length", str(len(response_body))),
         ],
     )
-    return [body]
+    return [response_body]
+
+
+def _encode_sse_event(event_name: str, payload: dict[str, Any]) -> bytes:
+    lines = [f"event: {event_name}", f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}", ""]
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _encode_sse_comment(text: str) -> bytes:
+    return f": {text}\n\n".encode("utf-8")
+
+
+def _event_stream_response(start_response: Any, body_iter: Any) -> Any:
+    start_response(
+        "200 OK",
+        [
+            ("Content-Type", "text/event-stream; charset=utf-8"),
+            ("Cache-Control", "no-store"),
+            ("X-Accel-Buffering", "no"),
+        ],
+    )
+    return body_iter
 
 
 def create_app(settings: Settings):
     database = UsageDatabase(settings.db_path)
     database.initialize()
-    index_body = render_index_page(settings).encode("utf-8")
     json_cache = _JsonResponseCache()
+    page_cache = _JsonResponseCache(max_entries=8)
 
-    def app(environ: dict[str, Any], start_response: Any) -> list[bytes]:
+    def _normalize_filter_from_query(query_string: str) -> str:
+        query = parse_qs(query_string, keep_blank_values=False)
+        filter_name = query.get("filter", ["all"])[0]
+        return filter_name if filter_name in FILTERS else "all"
+
+    def _build_dashboard_json(current_filter: str) -> bytes:
+        revisions = database.fetch_change_state()
+        cache_key = ("dashboard", current_filter, int(revisions["accounts_revision"]))
+        return json_cache.get_or_build(
+            cache_key,
+            lambda: _encode_json_body(build_dashboard_payload(settings, current_filter, database)),
+        )
+
+    def _build_progress_json() -> bytes:
+        revisions = database.fetch_change_state()
+        cache_key = ("progress", int(revisions["runtime_revision"]))
+        return json_cache.get_or_build(
+            cache_key,
+            lambda: _encode_json_body(build_progress_payload(settings, database)),
+        )
+
+    def _build_index_body(gzip_enabled: bool) -> bytes:
+        revisions = database.fetch_change_state()
+        cache_key = (
+            "index",
+            int(revisions["accounts_revision"]),
+            int(revisions["runtime_revision"]),
+            1 if gzip_enabled else 0,
+        )
+
+        def _builder() -> bytes:
+            html = render_index_page(
+                settings,
+                initial_dashboard_payload=build_dashboard_payload(settings, "active", database),
+                initial_progress_payload=build_progress_payload(settings, database),
+            ).encode("utf-8")
+            if gzip_enabled and len(html) >= settings.web_gzip_min_bytes:
+                return gzip.compress(html, compresslevel=1)
+            return html
+
+        return page_cache.get_or_build(cache_key, _builder)
+
+    def _iter_event_stream(current_filter: str):
+        initial_revisions = database.fetch_change_state()
+        yield f"retry: {EVENT_STREAM_RETRY_MS}\n\n".encode("utf-8")
+        yield _encode_sse_event("progress", build_progress_payload(settings, database))
+        yield _encode_sse_event("dashboard", build_dashboard_payload(settings, current_filter, database))
+
+        last_accounts_revision = int(initial_revisions["accounts_revision"])
+        last_runtime_revision = int(initial_revisions["runtime_revision"])
+        last_keepalive_at = monotonic()
+
+        try:
+            while True:
+                sleep(settings.sse_poll_seconds)
+                revisions = database.fetch_change_state()
+                current_accounts_revision = int(revisions["accounts_revision"])
+                current_runtime_revision = int(revisions["runtime_revision"])
+                emitted = False
+
+                if current_runtime_revision != last_runtime_revision:
+                    last_runtime_revision = current_runtime_revision
+                    yield _encode_sse_event("progress", build_progress_payload(settings, database))
+                    emitted = True
+
+                if current_accounts_revision != last_accounts_revision:
+                    last_accounts_revision = current_accounts_revision
+                    yield _encode_sse_event(
+                        "dashboard",
+                        build_dashboard_payload(settings, current_filter, database),
+                    )
+                    emitted = True
+
+                now = monotonic()
+                if emitted:
+                    last_keepalive_at = now
+                    continue
+
+                if now - last_keepalive_at >= max(settings.sse_ping_seconds, EVENT_STREAM_KEEPALIVE_SECONDS):
+                    yield _encode_sse_comment("ping")
+                    last_keepalive_at = now
+        except GeneratorExit:
+            logger.debug("SSE 客户端已断开：filter=%s", current_filter)
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("SSE 推送异常：filter=%s", current_filter)
+            return
+
+    def app(environ: dict[str, Any], start_response: Any) -> Any:
         method = environ.get("REQUEST_METHOD", "GET").upper()
         path = environ.get("PATH_INFO", "/")
 
@@ -3187,20 +3351,38 @@ def create_app(settings: Settings):
                 return _text_response(start_response, "405 Method Not Allowed", "method not allowed")
             status, payload = build_manual_scan_payload(settings, database)
             json_cache.clear()
-            return _json_response(start_response, status, payload)
+            return _json_response(start_response, status, payload, environ=environ, settings=settings)
 
         if path == "/api/scan/stop":
             if method != "POST":
                 return _text_response(start_response, "405 Method Not Allowed", "method not allowed")
             status, payload = build_manual_stop_payload(settings, database)
             json_cache.clear()
-            return _json_response(start_response, status, payload)
+            return _json_response(start_response, status, payload, environ=environ, settings=settings)
 
         if method != "GET":
             return _text_response(start_response, "405 Method Not Allowed", "method not allowed")
 
         if path == "/":
-            return _html_bytes_response(start_response, index_body)
+            gzip_enabled = _accepts_gzip(environ) and settings.web_gzip_min_bytes > 0
+            body = _build_index_body(gzip_enabled)
+            headers = [
+                ("Content-Type", "text/html; charset=utf-8"),
+                ("Cache-Control", "no-store"),
+            ]
+            if gzip_enabled and len(body) >= settings.web_gzip_min_bytes:
+                headers.extend(
+                    [
+                        ("Content-Encoding", "gzip"),
+                        ("Vary", "Accept-Encoding"),
+                    ]
+                )
+            headers.append(("Content-Length", str(len(body))))
+            start_response(
+                "200 OK",
+                headers,
+            )
+            return [body]
 
         if path == "/healthz":
             try:
@@ -3211,23 +3393,29 @@ def create_app(settings: Settings):
             return _text_response(start_response, "200 OK", "ok")
 
         if path == "/api/dashboard":
-            query = parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=False)
-            filter_name = query.get("filter", ["all"])[0]
-            current_filter = filter_name if filter_name in FILTERS else "all"
-            body = json_cache.get_or_build(
-                ("dashboard", current_filter),
-                DASHBOARD_CACHE_TTL_SECONDS,
-                lambda: _encode_json_body(build_dashboard_payload(settings, current_filter, database)),
+            current_filter = _normalize_filter_from_query(environ.get("QUERY_STRING", ""))
+            body = _build_dashboard_json(current_filter)
+            return _json_bytes_response(
+                start_response,
+                "200 OK",
+                body,
+                environ=environ,
+                settings=settings,
             )
-            return _json_bytes_response(start_response, "200 OK", body)
 
         if path == "/api/progress":
-            body = json_cache.get_or_build(
-                ("progress",),
-                PROGRESS_CACHE_TTL_SECONDS,
-                lambda: _encode_json_body(build_progress_payload(settings, database)),
+            body = _build_progress_json()
+            return _json_bytes_response(
+                start_response,
+                "200 OK",
+                body,
+                environ=environ,
+                settings=settings,
             )
-            return _json_bytes_response(start_response, "200 OK", body)
+
+        if path == "/api/events":
+            current_filter = _normalize_filter_from_query(environ.get("QUERY_STRING", ""))
+            return _event_stream_response(start_response, _iter_event_stream(current_filter))
 
         return _text_response(start_response, "404 Not Found", "not found")
 

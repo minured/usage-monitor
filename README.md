@@ -92,6 +92,9 @@ cp .env.example .env
 | `USAGE_MONITOR_PER_ACCOUNT_INTERVAL_SECONDS` | `3` | 同一轮内账号之间的间隔 |
 | `USAGE_MONITOR_ROUND_INTERVAL_SECONDS` | `21600` | 整轮结束后的等待时间 |
 | `USAGE_MONITOR_MANUAL_TRIGGER_POLL_SECONDS` | `2` | `sleeping` 阶段检查手动触发请求的轮询间隔 |
+| `USAGE_MONITOR_SSE_POLL_SECONDS` | `0.5` | Web 端检查数据库修订号并触发 SSE 推送的间隔 |
+| `USAGE_MONITOR_SSE_PING_SECONDS` | `15` | SSE 空闲保活间隔 |
+| `USAGE_MONITOR_WEB_GZIP_MIN_BYTES` | `1024` | HTML / JSON 响应启用 gzip 的最小字节数 |
 | `USAGE_MONITOR_REQUEST_TIMEOUT_SECONDS` | `30` | 单次 HTTP 请求超时 |
 | `USAGE_MONITOR_WEB_HOST` | `127.0.0.1` | Web 监听地址 |
 | `USAGE_MONITOR_WEB_PORT` | `8765` | Web 监听端口 |
@@ -131,10 +134,10 @@ http://127.0.0.1:8765
 
 页面行为补充：
 
-- 列表默认每 30 秒刷新一次
-- 顶部“本轮进度”会按阶段自适应刷新
-- `querying` 阶段默认 1 秒刷新一次
-- `sleeping` 阶段自动降频，避免长时间空转轮询
+- 首页会直接内嵌当前 `active` 列表与进度快照，减少首次打开的额外请求
+- 页面后续改为通过 **SSE** 接收实时推送，不再靠前端定时轮询
+- 切换筛选后会重建 SSE 连接，并收到该筛选条件下的新快照
+- HTML / JSON 默认支持 gzip，显著降低首页和列表传输体积
 - 支持“手动开始扫描”和“停止本轮”，两个动作都会先二次确认
 - 停止本轮采用安全停止：当前账号会先完成，本轮剩余账号不再继续
 
@@ -214,10 +217,14 @@ Compose 行为：
   - 返回运维页面
 - `GET /api/dashboard?filter=all|active|available|exhausted|unknown|invalid|source_missing`
   - 返回总览和列表 JSON
-  - Web 进程内会做 1 秒短 TTL 缓存，降低连续切换筛选与重复刷新的开销
+  - Web 进程内会按 `accounts_revision` 复用已编码响应，账号数据变化后立即失效
 - `GET /api/progress`
-  - 返回当前采集轮次进度 JSON，供前端顶部进度区域自适应刷新
-  - Web 进程内会做 0.5 秒短 TTL 缓存，兼顾实时性与页面响应速度
+  - 返回当前采集轮次进度 JSON，供调试或外部调用使用
+  - Web 进程内会按 `runtime_revision` 复用已编码响应，运行态变化后立即失效
+- `GET /api/events?filter=...`
+  - 返回 `text/event-stream`
+  - 首次连接会立即推送 `progress` 与当前筛选下的 `dashboard`
+  - 后续由服务端按数据库修订号变化实时推送
 - `POST /api/scan`
   - 请求手动开始下一轮扫描；只会单实例串行执行，不会并发、也不会排队
 - `POST /api/scan/stop`

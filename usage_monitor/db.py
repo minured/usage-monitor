@@ -80,6 +80,8 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
 CREATE TABLE IF NOT EXISTS {RUNTIME_TABLE_NAME} (
     runtime_key TEXT PRIMARY KEY,
     phase TEXT NOT NULL,
+    accounts_revision INTEGER NOT NULL DEFAULT 0,
+    runtime_revision INTEGER NOT NULL DEFAULT 0,
     round_started_at_utc TEXT,
     round_finished_at_utc TEXT,
     next_round_at_utc TEXT,
@@ -157,6 +159,8 @@ CREATE TABLE {TABLE_NAME} (
 RUNTIME_UPSERT_COLUMNS = [
     "runtime_key",
     "phase",
+    "accounts_revision",
+    "runtime_revision",
     "round_started_at_utc",
     "round_finished_at_utc",
     "next_round_at_utc",
@@ -217,6 +221,7 @@ class UsageDatabase:
                 conn.executescript(SCHEMA)
                 self._ensure_accounts_schema(conn)
                 self._ensure_runtime_schema(conn)
+                self._ensure_indexes(conn)
                 conn.commit()
 
             self._initialized_paths.add(cache_key)
@@ -292,6 +297,14 @@ class UsageDatabase:
             str(row["name"])
             for row in conn.execute(f"PRAGMA table_info({RUNTIME_TABLE_NAME})").fetchall()
         }
+        if "accounts_revision" not in existing_columns:
+            conn.execute(
+                f"ALTER TABLE {RUNTIME_TABLE_NAME} ADD COLUMN accounts_revision INTEGER NOT NULL DEFAULT 0"
+            )
+        if "runtime_revision" not in existing_columns:
+            conn.execute(
+                f"ALTER TABLE {RUNTIME_TABLE_NAME} ADD COLUMN runtime_revision INTEGER NOT NULL DEFAULT 0"
+            )
         if "manual_trigger_requested_at" not in existing_columns:
             conn.execute(
                 f"ALTER TABLE {RUNTIME_TABLE_NAME} ADD COLUMN manual_trigger_requested_at TEXT"
@@ -300,6 +313,36 @@ class UsageDatabase:
             conn.execute(
                 f"ALTER TABLE {RUNTIME_TABLE_NAME} ADD COLUMN manual_stop_requested_at TEXT"
             )
+
+    @staticmethod
+    def _ensure_indexes(conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_accounts_latest_sort_all
+            ON {TABLE_NAME} (
+                last_checked_at_utc DESC,
+                updated_at_utc DESC,
+                email ASC
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_accounts_latest_lifecycle_sort
+            ON {TABLE_NAME} (
+                lifecycle_status,
+                last_checked_at_utc DESC,
+                updated_at_utc DESC,
+                email ASC
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_accounts_latest_lifecycle_quota_sort
+            ON {TABLE_NAME} (
+                lifecycle_status,
+                quota_status,
+                last_checked_at_utc DESC,
+                updated_at_utc DESC,
+                email ASC
+            );
+            """
+        )
 
     def ping(self) -> None:
         with self._connect() as conn:
@@ -315,10 +358,12 @@ class UsageDatabase:
 
     def delete_account(self, dimension_key: str) -> None:
         with self._connect() as conn:
+            self._ensure_runtime_row_in_transaction(conn)
             conn.execute(
                 f"DELETE FROM {TABLE_NAME} WHERE dimension_key = ?",
                 (str(dimension_key or ""),),
             )
+            self._bump_accounts_revision_in_transaction(conn)
             conn.commit()
 
     def upsert_account(self, payload: dict[str, Any]) -> None:
@@ -349,11 +394,14 @@ class UsageDatabase:
             f"ON CONFLICT(dimension_key) DO UPDATE SET {update_clause}"
         )
         with self._connect() as conn:
+            self._ensure_runtime_row_in_transaction(conn)
             conn.execute(sql, values)
+            self._bump_accounts_revision_in_transaction(conn)
             conn.commit()
 
     def upsert_runtime(self, payload: dict[str, Any]) -> None:
-        values = [payload.get(column) for column in RUNTIME_UPSERT_COLUMNS]
+        normalized_payload = dict(payload)
+        runtime_key = str(normalized_payload.get("runtime_key") or RUNTIME_KEY)
         placeholders = ", ".join("?" for _ in RUNTIME_UPSERT_COLUMNS)
         update_clause = ", ".join(
             f"{column}=excluded.{column}"
@@ -366,6 +414,26 @@ class UsageDatabase:
             f"ON CONFLICT(runtime_key) DO UPDATE SET {update_clause}"
         )
         with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT accounts_revision, runtime_revision
+                FROM {RUNTIME_TABLE_NAME}
+                WHERE runtime_key = ?
+                """,
+                (runtime_key,),
+            ).fetchone()
+            normalized_payload["runtime_key"] = runtime_key
+            normalized_payload["accounts_revision"] = (
+                int(row["accounts_revision"] or 0)
+                if row is not None
+                else int(normalized_payload.get("accounts_revision") or 0)
+            )
+            normalized_payload["runtime_revision"] = (
+                int(row["runtime_revision"] or 0) + 1
+                if row is not None
+                else max(int(normalized_payload.get("runtime_revision") or 0), 0) + 1
+            )
+            values = [normalized_payload.get(column) for column in RUNTIME_UPSERT_COLUMNS]
             conn.execute(sql, values)
             conn.commit()
 
@@ -424,11 +492,21 @@ class UsageDatabase:
 
             rows = conn.execute(
                 f"""
-                SELECT *
+                SELECT
+                    dimension_key,
+                    email,
+                    lifecycle_status,
+                    quota_status,
+                    used_percent,
+                    reset_at_utc,
+                    last_checked_at_utc,
+                    invalid_reason_detail,
+                    last_error_detail,
+                    source_file,
+                    plan_type
                 FROM {TABLE_NAME}
                 {where_clause}
                 ORDER BY
-                    CASE WHEN last_checked_at_utc IS NULL OR last_checked_at_utc = '' THEN 1 ELSE 0 END,
                     last_checked_at_utc DESC,
                     updated_at_utc DESC,
                     email ASC
@@ -456,6 +534,8 @@ class UsageDatabase:
         return {
             "runtime_key": RUNTIME_KEY,
             "phase": COLLECTOR_PHASE_IDLE,
+            "accounts_revision": 0,
+            "runtime_revision": 0,
             "round_started_at_utc": None,
             "round_finished_at_utc": None,
             "next_round_at_utc": None,
@@ -567,7 +647,10 @@ class UsageDatabase:
             conn.execute(
                 f"""
                 UPDATE {RUNTIME_TABLE_NAME}
-                SET {request_column} = ?, updated_at_utc = ?
+                SET
+                    {request_column} = ?,
+                    runtime_revision = COALESCE(runtime_revision, 0) + 1,
+                    updated_at_utc = ?
                 WHERE runtime_key = ?
                 """,
                 (requested_at, requested_at, RUNTIME_KEY),
@@ -605,10 +688,34 @@ class UsageDatabase:
             conn.execute(
                 f"""
                 UPDATE {RUNTIME_TABLE_NAME}
-                SET {request_column} = NULL, updated_at_utc = ?
+                SET
+                    {request_column} = NULL,
+                    runtime_revision = COALESCE(runtime_revision, 0) + 1,
+                    updated_at_utc = ?
                 WHERE runtime_key = ?
                 """,
                 (utc_now_iso(), RUNTIME_KEY),
             )
             conn.commit()
             return requested_at
+
+    def fetch_change_state(self) -> dict[str, int]:
+        with self._connect() as conn:
+            row = self._ensure_runtime_row_in_transaction(conn)
+            return {
+                "accounts_revision": int(row["accounts_revision"] or 0),
+                "runtime_revision": int(row["runtime_revision"] or 0),
+            }
+
+    @staticmethod
+    def _bump_accounts_revision_in_transaction(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            f"""
+            UPDATE {RUNTIME_TABLE_NAME}
+            SET
+                accounts_revision = COALESCE(accounts_revision, 0) + 1,
+                updated_at_utc = ?
+            WHERE runtime_key = ?
+            """,
+            (utc_now_iso(), RUNTIME_KEY),
+        )
