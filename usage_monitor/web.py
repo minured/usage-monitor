@@ -578,7 +578,7 @@ def _render_index_styles() -> str:
     }
     .meta-pair {
       display: inline-flex;
-      align-items: baseline;
+      align-items: center;
       gap: 5px;
       white-space: nowrap;
     }
@@ -729,6 +729,13 @@ def _render_index_styles() -> str:
     .summary-block {
       display: grid;
       overflow: hidden;
+      border-color: rgba(215, 222, 232, 0.68);
+      box-shadow: none;
+    }
+    .summary-block .section-heading {
+      border-bottom: 0;
+      background: #fff;
+      padding: 8px 10px 4px;
     }
     .section-heading,
     .panel-head {
@@ -784,9 +791,9 @@ def _render_index_styles() -> str:
     .summary {
       display: grid;
       grid-template-columns: repeat(7, minmax(0, 1fr));
-      gap: 1px;
-      padding: 1px;
-      background: var(--line);
+      gap: 4px;
+      padding: 6px;
+      background: #fff;
     }
     .summary-card {
       --filter-accent: var(--filter-total);
@@ -796,14 +803,14 @@ def _render_index_styles() -> str:
       position: relative;
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
-      align-items: baseline;
-      gap: 8px;
+      align-items: center;
+      gap: 4px 8px;
       min-width: 0;
       min-height: 48px;
-      padding: 8px 10px;
+      padding: 8px 10px 9px;
       border: 0;
-      border-radius: 0;
-      background: #fff;
+      border-radius: var(--radius-sm);
+      background: transparent;
       color: var(--text);
       text-align: left;
       cursor: pointer;
@@ -814,9 +821,9 @@ def _render_index_styles() -> str:
       position: absolute;
       left: 10px;
       right: 10px;
-      bottom: 0;
+      bottom: 3px;
       height: 2px;
-      border-radius: 999px 999px 0 0;
+      border-radius: 999px;
       background: var(--filter-accent);
       opacity: 0;
       transition: opacity 140ms ease;
@@ -862,6 +869,18 @@ def _render_index_styles() -> str:
       line-height: 1;
       font-weight: 760;
       letter-spacing: -0.03em;
+    }
+    .summary-subtext {
+      grid-column: 1 / -1;
+      min-width: 0;
+      overflow: hidden;
+      color: var(--filter-accent);
+      font-size: 11px;
+      font-weight: 650;
+      line-height: 1.2;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
     }
     .panel {
       position: relative;
@@ -1291,8 +1310,8 @@ def _render_index_styles() -> str:
       .page { padding: 10px 10px 22px; }
       .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .sticky-table-shell { display: none !important; }
-      .panel-head,
-      .section-heading { align-items: flex-start; flex-direction: column; }
+      .panel-head { align-items: flex-start; flex-direction: column; }
+      .summary-block .section-heading { align-items: center; flex-direction: row; }
     }
     @media (max-width: 768px) {
       body { overflow-x: hidden; }
@@ -1772,6 +1791,7 @@ def _render_index_script(
     function refreshLiveCountdowns() {{
       refreshNextRoundCountdown();
       refreshResetCountdowns();
+      refreshExhaustedRecoveryCountdown();
     }}
 
     function formatProgressPercent(value) {{
@@ -2542,6 +2562,54 @@ def _render_index_script(
       }});
     }}
 
+    function getEarliestExhaustedResetAt(items = state.items) {{
+      if (!Array.isArray(items) || items.length === 0) {{
+        return "";
+      }}
+      const now = Date.now();
+      let earliest = null;
+      items.forEach((item) => {{
+        if (String((item && item.lifecycle_status) || "") !== "active") {{
+          return;
+        }}
+        if (String((item && item.quota_status) || "") !== "exhausted") {{
+          return;
+        }}
+        const rawResetAt = String((item && item.reset_at_utc) || "").trim();
+        const millis = parseUtcMillis(rawResetAt);
+        if (millis === null || millis <= now) {{
+          return;
+        }}
+        if (earliest === null || millis < earliest.millis) {{
+          earliest = {{ millis, rawResetAt }};
+        }}
+      }});
+      return earliest ? earliest.rawResetAt : "";
+    }}
+
+    function refreshExhaustedRecoveryCountdown() {{
+      const element = document.getElementById("exhausted-recovery");
+      if (!element) {{
+        return;
+      }}
+      const resetAt = getEarliestExhaustedResetAt();
+      if (!resetAt) {{
+        element.textContent = "最快恢复 -";
+        element.title = "暂无可预计恢复时间";
+        return;
+      }}
+      const countdown = formatDurationMinutesFromNow(resetAt) || "-";
+      element.textContent = `最快恢复 ${{countdown}}`;
+      element.title = formatUtcToShanghai(resetAt, "") || "-";
+    }}
+
+    function renderSummaryExtra(key) {{
+      if (key !== "exhausted") {{
+        return "";
+      }}
+      return '<span id="exhausted-recovery" class="summary-subtext" data-exhausted-recovery>最快恢复 -</span>';
+    }}
+
     function renderAvailabilityRate(summary) {{
       const rateElement = document.getElementById("availability-rate");
       const valueElement = document.getElementById("availability-rate-value");
@@ -2583,10 +2651,12 @@ def _render_index_script(
         >
           <span class="summary-label">${{labels.summary[key] || key}}</span>
           <strong class="summary-value">${{summary[key] ?? 0}}</strong>
+          ${{renderSummaryExtra(key)}}
         </button>
       `;
       }}).join("");
       document.getElementById("summary").innerHTML = html;
+      refreshExhaustedRecoveryCountdown();
       renderStickyQuickFilters(state.summary);
     }}
 
