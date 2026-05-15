@@ -791,7 +791,7 @@ def _render_index_styles() -> str:
     .summary {
       display: grid;
       grid-template-columns: repeat(7, minmax(0, 1fr));
-      gap: 0;
+      gap: 4px;
       padding: 5px;
       background: #fff;
     }
@@ -809,8 +809,7 @@ def _render_index_styles() -> str:
       min-height: 48px;
       padding: 8px 10px 9px;
       border: 1px solid transparent;
-      border-right-color: rgba(215, 222, 232, 0.54);
-      border-radius: 0;
+      border-radius: var(--radius-sm);
       background: transparent;
       color: var(--text);
       text-align: left;
@@ -850,16 +849,8 @@ def _render_index_styles() -> str:
     .summary-card-source_missing,
     .sticky-filter-source_missing,
     .table-filter-source_missing { --filter-accent: var(--filter-missing); --filter-bg: #fffbeb; --filter-border: #fde68a; }
-    .summary-card:first-child {
-      border-top-left-radius: var(--radius-sm);
-      border-bottom-left-radius: var(--radius-sm);
-    }
-    .summary-card:last-child {
-      border-right-color: transparent;
-      border-top-right-radius: var(--radius-sm);
-      border-bottom-right-radius: var(--radius-sm);
-    }
     .summary-card:not(.is-active):hover {
+      border-radius: var(--radius-sm);
       background: color-mix(in srgb, var(--filter-bg) 62%, #ffffff);
     }
     .summary-card.is-active {
@@ -867,9 +858,6 @@ def _render_index_styles() -> str:
       border-radius: var(--radius-sm);
       background: var(--filter-bg);
       z-index: 1;
-    }
-    .summary-card:has(+ .summary-card.is-active) {
-      border-right-color: transparent;
     }
     .summary-card.is-active::after { opacity: 1; }
     .summary-label {
