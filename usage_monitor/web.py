@@ -2945,7 +2945,7 @@ def _render_index_script(
       const measuredWidth = Math.round(svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 640);
       const width = Math.max(360, measuredWidth);
       const height = 160;
-      const pad = {{ left: 0, right: 0, top: 14, bottom: 26 }};
+      const pad = {{ left: 10, right: 10, top: 14, bottom: 26 }};
       const plotWidth = width - pad.left - pad.right;
       const plotHeight = height - pad.top - pad.bottom;
       const bottom = pad.top + plotHeight;
@@ -3087,8 +3087,9 @@ def _render_index_script(
       svg.onpointermove = (event) => {{
         const rect = svg.getBoundingClientRect();
         const ratio = geometry.width / Math.max(rect.width, 1);
-        const x = Math.max(0, Math.min(geometry.width, (event.clientX - rect.left) * ratio));
-        const rawIndex = Math.round((x / Math.max(geometry.width, 1)) * (chartPoints.length - 1));
+        const cursorX = Math.max(geometry.pad.left, Math.min(geometry.width - geometry.pad.right, (event.clientX - rect.left) * ratio));
+        const plotWidth = Math.max(geometry.width - geometry.pad.left - geometry.pad.right, 1);
+        const rawIndex = Math.round(((cursorX - geometry.pad.left) / plotWidth) * (chartPoints.length - 1));
         const index = Math.max(0, Math.min(chartPoints.length - 1, rawIndex));
         renderTrendHover(svg, chartPoints[index], geometry);
       }};
