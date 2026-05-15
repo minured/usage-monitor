@@ -978,9 +978,8 @@ def _render_index_styles() -> str:
       opacity: 1;
     }
     .trend-hover-dot {
-      fill: #fff;
-      stroke: var(--filter-exhausted);
-      stroke-width: 2;
+      fill: #111827;
+      stroke: none;
     }
     .trend-floating-tooltip {
       position: absolute;
@@ -989,8 +988,12 @@ def _render_index_styles() -> str:
       z-index: 30;
       display: flex;
       align-items: center;
-      gap: 9px;
+      justify-content: center;
+      box-sizing: border-box;
+      width: 214px;
       max-width: calc(100% - 12px);
+      gap: 9px;
+      overflow: hidden;
       padding: 5px 9px;
       border: 1px solid rgba(215, 222, 232, 0.84);
       border-radius: 7px;
@@ -1719,8 +1722,7 @@ def _render_index_script(
       dashboardRevision: Number(initialDashboardPayload.accounts_revision || 0),
       nextRoundAtUtc: String(initialProgressPayload.next_round_at_utc || ""),
       nextRoundCountdownEnabled: String(initialProgressPayload.phase || "") === "sleeping",
-      lastRenderedMode: "",
-      trendHoverLastUpdatedAt: 0
+      lastRenderedMode: ""
     }};
 
     // 常量与标签
@@ -3052,11 +3054,12 @@ def _render_index_script(
       const canvasRect = canvas ? canvas.getBoundingClientRect() : svgRect;
       const canvasWidth = canvas ? canvas.clientWidth : svgRect.width;
       const relativeX = (svgRect.left - canvasRect.left) + (point.x / Math.max(geometry.width, 1)) * svgRect.width;
-      const tooltipWidth = tooltip.offsetWidth || 204;
+      const tooltipWidth = Math.min(214, Math.max(120, canvasWidth - 12));
       const halfWidth = tooltipWidth / 2;
       const clampedX = canvasWidth > tooltipWidth
-        ? Math.max(halfWidth, Math.min(canvasWidth - halfWidth, relativeX))
+        ? Math.max(halfWidth + 6, Math.min(canvasWidth - halfWidth - 6, relativeX))
         : canvasWidth / 2;
+      tooltip.style.width = `${{Math.round(tooltipWidth)}}px`;
       tooltip.style.left = `${{Math.round(clampedX)}}px`;
       if (point.y < geometry.height * 0.45) {{
         tooltip.style.top = "";
@@ -3075,7 +3078,7 @@ def _render_index_script(
       hover.removeAttribute("hidden");
       hover.innerHTML = `
         <line class="trend-hover-line" x1="${{formatSvgNumber(point.x)}}" y1="${{geometry.pad.top}}" x2="${{formatSvgNumber(point.x)}}" y2="${{geometry.bottom}}"></line>
-        <circle class="trend-hover-dot" cx="${{formatSvgNumber(point.x)}}" cy="${{formatSvgNumber(point.y)}}" r="3.2"></circle>
+        <circle class="trend-hover-dot" cx="${{formatSvgNumber(point.x)}}" cy="${{formatSvgNumber(point.y)}}" r="2"></circle>
       `;
       positionExhaustedTrendTooltip(svg, point, geometry);
     }}
@@ -3098,15 +3101,17 @@ def _render_index_script(
 
       const clearHover = () => clearExhaustedTrendHover();
       svg.onpointermove = (event) => {{
-        const now = window.performance ? performance.now() : Date.now();
-        if (now - state.trendHoverLastUpdatedAt < 16) {{
-          return;
-        }}
-        state.trendHoverLastUpdatedAt = now;
         const rect = svg.getBoundingClientRect();
         const ratio = geometry.width / Math.max(rect.width, 1);
         const x = (event.clientX - rect.left) * ratio;
-        const rawIndex = Math.round(((x - geometry.pad.left) / Math.max(geometry.width - geometry.pad.left - geometry.pad.right, 1)) * (chartPoints.length - 1));
+        const plotLeft = geometry.pad.left;
+        const plotRight = geometry.width - geometry.pad.right;
+        if (x < plotLeft || x > plotRight) {{
+          clearHover();
+          return;
+        }}
+        const plotRatio = (x - plotLeft) / Math.max(plotRight - plotLeft, 1);
+        const rawIndex = Math.round(plotRatio * (chartPoints.length - 1));
         const index = Math.max(0, Math.min(chartPoints.length - 1, rawIndex));
         renderTrendHover(svg, chartPoints[index], geometry);
       }};
