@@ -915,6 +915,7 @@ def _render_index_styles() -> str:
       font-variant-numeric: tabular-nums;
     }
     .summary-trend {
+      position: relative;
       display: grid;
       gap: 6px;
       padding: 8px 10px 10px;
@@ -956,6 +957,7 @@ def _render_index_styles() -> str:
       display: block;
       width: 100%;
       height: 154px;
+      cursor: crosshair;
     }
     .trend-grid-line { stroke: #ece8e1; stroke-width: 1; }
     .trend-axis-label {
@@ -981,19 +983,51 @@ def _render_index_styles() -> str:
       stroke: var(--filter-exhausted);
       stroke-width: 2;
     }
-    .trend-tooltip-box {
-      fill: #292524;
-      opacity: 0.94;
+    .trend-floating-tooltip {
+      position: absolute;
+      left: 50%;
+      top: 6px;
+      z-index: 30;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      max-width: calc(100% - 12px);
+      padding: 5px 9px;
+      border: 1px solid rgba(215, 222, 232, 0.84);
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.2;
+      pointer-events: none;
+      transform: translateX(-50%);
+      white-space: nowrap;
     }
-    .trend-tooltip-text {
-      fill: #fff;
-      font-size: 11px;
-      font-weight: 680;
+    .trend-floating-tooltip[hidden] { display: none !important; }
+    .trend-tooltip-pair {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+    }
+    .trend-tooltip-label { color: var(--muted); }
+    .trend-tooltip-value {
+      color: var(--text);
+      font-weight: 720;
       font-variant-numeric: tabular-nums;
     }
+    .trend-tooltip-value.is-exhausted { color: var(--filter-exhausted); }
+    .trend-tooltip-divider {
+      width: 1px;
+      height: 12px;
+      background: rgba(184, 194, 208, 0.72);
+    }
+    #exhausted-trend-hover[hidden] { display: none; }
     .trend-hit-layer {
       fill: transparent;
       cursor: crosshair;
+      pointer-events: all;
     }
     .trend-empty {
       position: absolute;
@@ -1574,8 +1608,13 @@ def _render_index_header() -> str:
             <span>exhausted trend</span>
             <span><strong id="exhausted-trend-current">-</strong> <span id="exhausted-trend-time">-</span></span>
           </div>
-          <div class="summary-trend-canvas">
+          <div id="exhausted-trend-canvas" class="summary-trend-canvas">
             <svg id="exhausted-trend-chart" class="trend-chart" viewBox="0 0 640 160" role="img" aria-labelledby="exhausted-trend-title"></svg>
+            <div id="exhausted-trend-tooltip" class="trend-floating-tooltip" hidden aria-hidden="true">
+              <span class="trend-tooltip-pair"><span class="trend-tooltip-label">时间</span><span id="exhausted-trend-tooltip-time" class="trend-tooltip-value">-</span></span>
+              <span class="trend-tooltip-divider"></span>
+              <span class="trend-tooltip-pair"><span class="trend-tooltip-label">exhausted</span><span id="exhausted-trend-tooltip-value" class="trend-tooltip-value is-exhausted">-</span></span>
+            </div>
             <div id="exhausted-trend-empty" class="trend-empty" hidden>等待更多变化</div>
           </div>
         </section>
@@ -1681,7 +1720,8 @@ def _render_index_script(
       dashboardRevision: Number(initialDashboardPayload.accounts_revision || 0),
       nextRoundAtUtc: String(initialProgressPayload.next_round_at_utc || ""),
       nextRoundCountdownEnabled: String(initialProgressPayload.phase || "") === "sleeping",
-      lastRenderedMode: ""
+      lastRenderedMode: "",
+      trendHoverLastUpdatedAt: 0
     }};
 
     // 常量与标签
@@ -2949,70 +2989,134 @@ def _render_index_script(
         ${{linePath ? `<path class="trend-line" d="${{linePath}}"></path>` : ""}}
         ${{xLabelHtml}}
         <g id="exhausted-trend-hover" hidden></g>
-        <rect id="exhausted-trend-hit-layer" class="trend-hit-layer" x="${{pad.left}}" y="${{pad.top}}" width="${{plotWidth}}" height="${{plotHeight}}"></rect>
+        <rect id="exhausted-trend-hit-layer" class="trend-hit-layer" x="0" y="0" width="${{width}}" height="${{height}}"></rect>
       `;
+      clearExhaustedTrendHover({{ restoreLatest: false }});
       bindExhaustedTrendHover(svg, chartPoints, {{ width, height, pad, bottom }});
+    }}
+
+    function setExhaustedTrendMeta(point) {{
+      const current = document.getElementById("exhausted-trend-current");
+      const time = document.getElementById("exhausted-trend-time");
+      if (current) {{
+        current.textContent = point ? String(point.exhausted) : "-";
+      }}
+      if (time) {{
+        time.textContent = point ? formatCompactDateTimeText(point.capturedAt) : "-";
+      }}
+    }}
+
+    function getLatestExhaustedTrendPoint() {{
+      const points = normalizeExhaustedHistory(state.exhaustedHistory);
+      return points[points.length - 1] || null;
+    }}
+
+    function clearExhaustedTrendHover(options = {{}}) {{
+      const restoreLatest = options.restoreLatest !== false;
+      const svg = document.getElementById("exhausted-trend-chart");
+      const hover = svg ? svg.querySelector("#exhausted-trend-hover") : null;
+      const tooltip = document.getElementById("exhausted-trend-tooltip");
+      if (hover) {{
+        hover.hidden = true;
+        hover.innerHTML = "";
+      }}
+      if (tooltip) {{
+        tooltip.hidden = true;
+        tooltip.setAttribute("aria-hidden", "true");
+        tooltip.style.left = "";
+        tooltip.style.top = "";
+        tooltip.style.bottom = "";
+      }}
+      if (restoreLatest) {{
+        setExhaustedTrendMeta(getLatestExhaustedTrendPoint());
+      }}
+    }}
+
+    function positionExhaustedTrendTooltip(svg, point, geometry) {{
+      const tooltip = document.getElementById("exhausted-trend-tooltip");
+      const tooltipTime = document.getElementById("exhausted-trend-tooltip-time");
+      const tooltipValue = document.getElementById("exhausted-trend-tooltip-value");
+      if (!tooltip || !point) {{
+        return;
+      }}
+      if (tooltipTime) {{
+        tooltipTime.textContent = formatCompactDateTimeText(point.capturedAt);
+      }}
+      if (tooltipValue) {{
+        tooltipValue.textContent = String(point.exhausted);
+      }}
+      tooltip.hidden = false;
+      tooltip.setAttribute("aria-hidden", "false");
+
+      const canvas = document.getElementById("exhausted-trend-canvas") || svg.closest(".summary-trend-canvas");
+      const svgRect = svg.getBoundingClientRect();
+      const canvasRect = canvas ? canvas.getBoundingClientRect() : svgRect;
+      const canvasWidth = canvas ? canvas.clientWidth : svgRect.width;
+      const relativeX = (svgRect.left - canvasRect.left) + (point.x / Math.max(geometry.width, 1)) * svgRect.width;
+      const tooltipWidth = tooltip.offsetWidth || 204;
+      const halfWidth = tooltipWidth / 2;
+      const clampedX = canvasWidth > tooltipWidth
+        ? Math.max(halfWidth, Math.min(canvasWidth - halfWidth, relativeX))
+        : canvasWidth / 2;
+      tooltip.style.left = `${{Math.round(clampedX)}}px`;
+      if (point.y < geometry.height * 0.45) {{
+        tooltip.style.top = "";
+        tooltip.style.bottom = "6px";
+      }} else {{
+        tooltip.style.top = "6px";
+        tooltip.style.bottom = "";
+      }}
     }}
 
     function renderTrendHover(svg, point, geometry) {{
       const hover = svg.querySelector("#exhausted-trend-hover");
-      const current = document.getElementById("exhausted-trend-current");
-      const time = document.getElementById("exhausted-trend-time");
       if (!hover || !point) {{
         return;
       }}
-      const tooltipWidth = 136;
-      const tooltipHeight = 38;
-      const tooltipGap = 8;
-      const tooltipX = Math.min(
-        Math.max(point.x + tooltipGap, 6),
-        geometry.width - tooltipWidth - 6
-      );
-      const tooltipY = Math.max(6, point.y - tooltipHeight - 10);
       hover.hidden = false;
       hover.innerHTML = `
         <line class="trend-hover-line" x1="${{formatSvgNumber(point.x)}}" y1="${{geometry.pad.top}}" x2="${{formatSvgNumber(point.x)}}" y2="${{geometry.bottom}}"></line>
-        <circle class="trend-hover-dot" cx="${{formatSvgNumber(point.x)}}" cy="${{formatSvgNumber(point.y)}}" r="3.4"></circle>
-        <rect class="trend-tooltip-box" x="${{formatSvgNumber(tooltipX)}}" y="${{formatSvgNumber(tooltipY)}}" width="${{tooltipWidth}}" height="${{tooltipHeight}}" rx="6"></rect>
-        <text class="trend-tooltip-text" x="${{formatSvgNumber(tooltipX + 8)}}" y="${{formatSvgNumber(tooltipY + 15)}}">${{escapeHtml(formatCompactDateTimeText(point.capturedAt))}}</text>
-        <text class="trend-tooltip-text" x="${{formatSvgNumber(tooltipX + 8)}}" y="${{formatSvgNumber(tooltipY + 30)}}">exhausted ${{point.exhausted}}</text>
+        <circle class="trend-hover-dot" cx="${{formatSvgNumber(point.x)}}" cy="${{formatSvgNumber(point.y)}}" r="3.2"></circle>
       `;
-      if (current) {{
-        current.textContent = String(point.exhausted);
-      }}
-      if (time) {{
-        time.textContent = formatCompactDateTimeText(point.capturedAt);
-      }}
+      positionExhaustedTrendTooltip(svg, point, geometry);
     }}
 
     function bindExhaustedTrendHover(svg, chartPoints, geometry) {{
       const hitLayer = svg.querySelector("#exhausted-trend-hit-layer");
       const hover = svg.querySelector("#exhausted-trend-hover");
+      const canvas = document.getElementById("exhausted-trend-canvas") || svg.closest(".summary-trend-canvas");
+      svg.onpointermove = null;
+      svg.onpointerleave = null;
+      svg.onpointercancel = null;
+      if (canvas) {{
+        canvas.onpointerleave = null;
+        canvas.onpointercancel = null;
+      }}
       if (!hitLayer || !hover || !chartPoints.length) {{
+        clearExhaustedTrendHover({{ restoreLatest: false }});
         return;
       }}
-      hitLayer.addEventListener("pointermove", (event) => {{
+
+      const clearHover = () => clearExhaustedTrendHover();
+      svg.onpointermove = (event) => {{
+        const now = window.performance ? performance.now() : Date.now();
+        if (now - state.trendHoverLastUpdatedAt < 16) {{
+          return;
+        }}
+        state.trendHoverLastUpdatedAt = now;
         const rect = svg.getBoundingClientRect();
         const ratio = geometry.width / Math.max(rect.width, 1);
         const x = (event.clientX - rect.left) * ratio;
         const rawIndex = Math.round(((x - geometry.pad.left) / Math.max(geometry.width - geometry.pad.left - geometry.pad.right, 1)) * (chartPoints.length - 1));
         const index = Math.max(0, Math.min(chartPoints.length - 1, rawIndex));
         renderTrendHover(svg, chartPoints[index], geometry);
-      }});
-      hitLayer.addEventListener("pointerleave", () => {{
-        hover.hidden = true;
-        const current = document.getElementById("exhausted-trend-current");
-        const time = document.getElementById("exhausted-trend-time");
-        const latest = chartPoints[chartPoints.length - 1];
-        if (latest) {{
-          if (current) {{
-            current.textContent = String(latest.exhausted);
-          }}
-          if (time) {{
-            time.textContent = formatCompactDateTimeText(latest.capturedAt);
-          }}
-        }}
-      }});
+      }};
+      svg.onpointerleave = clearHover;
+      svg.onpointercancel = clearHover;
+      if (canvas) {{
+        canvas.onpointerleave = clearHover;
+        canvas.onpointercancel = clearHover;
+      }}
     }}
 
     function updateExhaustedHistory(history) {{
@@ -3236,6 +3340,23 @@ def _render_index_script(
 
     document.getElementById("summary-trend-toggle").addEventListener("click", () => {{
       setSummaryTrendVisible(!state.summaryTrendVisible, true);
+    }});
+
+    document.addEventListener("pointerdown", (event) => {{
+      const panel = document.getElementById("summary-trend-panel");
+      if (panel && event.target instanceof Node && !panel.contains(event.target)) {{
+        clearExhaustedTrendHover();
+      }}
+    }}, {{ passive: true }});
+
+    window.addEventListener("blur", () => {{
+      clearExhaustedTrendHover();
+    }});
+
+    document.addEventListener("visibilitychange", () => {{
+      if (document.hidden) {{
+        clearExhaustedTrendHover();
+      }}
     }});
 
     document.addEventListener("click", (event) => {{
