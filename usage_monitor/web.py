@@ -729,13 +729,13 @@ def _render_index_styles() -> str:
     .summary-block {
       display: grid;
       overflow: hidden;
-      border-color: rgba(215, 222, 232, 0.68);
+      border-color: rgba(184, 194, 208, 0.62);
       box-shadow: none;
     }
     .summary-block .section-heading {
-      border-bottom: 0;
+      border-bottom: 1px solid rgba(215, 222, 232, 0.64);
       background: #fff;
-      padding: 8px 10px 4px;
+      padding: 8px 10px;
     }
     .section-heading,
     .panel-head {
@@ -770,7 +770,7 @@ def _render_index_styles() -> str:
     .availability-rate {
       --rate-color: var(--filter-unknown);
       display: inline-flex;
-      align-items: baseline;
+      align-items: center;
       gap: 5px;
       min-height: 24px;
       padding: 0 8px;
@@ -791,8 +791,8 @@ def _render_index_styles() -> str:
     .summary {
       display: grid;
       grid-template-columns: repeat(7, minmax(0, 1fr));
-      gap: 4px;
-      padding: 6px;
+      gap: 0;
+      padding: 5px;
       background: #fff;
     }
     .summary-card {
@@ -808,8 +808,9 @@ def _render_index_styles() -> str:
       min-width: 0;
       min-height: 48px;
       padding: 8px 10px 9px;
-      border: 0;
-      border-radius: var(--radius-sm);
+      border: 1px solid transparent;
+      border-right-color: rgba(215, 222, 232, 0.54);
+      border-radius: 0;
       background: transparent;
       color: var(--text);
       text-align: left;
@@ -821,7 +822,7 @@ def _render_index_styles() -> str:
       position: absolute;
       left: 10px;
       right: 10px;
-      bottom: 3px;
+      bottom: 2px;
       height: 2px;
       border-radius: 999px;
       background: var(--filter-accent);
@@ -849,9 +850,22 @@ def _render_index_styles() -> str:
     .summary-card-source_missing,
     .sticky-filter-source_missing,
     .table-filter-source_missing { --filter-accent: var(--filter-missing); --filter-bg: #fffbeb; --filter-border: #fde68a; }
-    .summary-card:hover,
+    .summary-card:first-child {
+      border-top-left-radius: var(--radius-sm);
+      border-bottom-left-radius: var(--radius-sm);
+    }
+    .summary-card:last-child {
+      border-right-color: transparent;
+      border-top-right-radius: var(--radius-sm);
+      border-bottom-right-radius: var(--radius-sm);
+    }
+    .summary-card:hover {
+      background: color-mix(in srgb, var(--filter-bg) 62%, #ffffff);
+    }
     .summary-card.is-active {
+      border-color: var(--filter-border);
       background: var(--filter-bg);
+      z-index: 1;
     }
     .summary-card.is-active::after { opacity: 1; }
     .summary-label {
