@@ -713,8 +713,12 @@ def _render_index_styles() -> str:
     }
     .summary-block .section-heading {
       border-bottom: 1px solid rgba(215, 222, 232, 0.64);
+      border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
       background: #fff;
       padding: 8px 10px;
+    }
+    .summary-block:has(.summary-trend[hidden]) .summary {
+      border-radius: 0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px);
     }
     .section-heading,
     .panel-head {
@@ -920,6 +924,7 @@ def _render_index_styles() -> str:
       gap: 6px;
       padding: 8px 10px 10px;
       border-top: 1px solid rgba(215, 222, 232, 0.64);
+      border-radius: 0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px);
       background: linear-gradient(180deg, #fff 0%, #fffaf5 100%);
     }
     .summary-trend[hidden] { display: none !important; }
@@ -949,7 +954,6 @@ def _render_index_styles() -> str:
       position: relative;
       min-height: 154px;
       overflow: visible;
-      border: 1px solid rgba(251, 146, 60, 0.16);
       border-radius: var(--radius-sm);
       background: #fff;
     }
@@ -958,7 +962,6 @@ def _render_index_styles() -> str:
       width: 100%;
       height: 154px;
     }
-    .trend-grid-line { stroke: #ece8e1; stroke-width: 1; }
     .trend-axis-label {
       fill: #8a8177;
       font-size: 10px;
@@ -1607,7 +1610,7 @@ def _render_index_header() -> str:
             <span><strong id="exhausted-trend-current">-</strong> <span id="exhausted-trend-time">-</span></span>
           </div>
           <div id="exhausted-trend-canvas" class="summary-trend-canvas">
-            <svg id="exhausted-trend-chart" class="trend-chart" viewBox="0 0 640 160" preserveAspectRatio="none" role="img" aria-labelledby="exhausted-trend-title"></svg>
+            <svg id="exhausted-trend-chart" class="trend-chart" viewBox="0 0 640 160" preserveAspectRatio="none" role="img" aria-label="exhausted 数量趋势"></svg>
             <div id="exhausted-trend-tooltip" class="trend-floating-tooltip" hidden aria-hidden="true">
               <span class="trend-tooltip-pair"><span class="trend-tooltip-label">时间</span><span id="exhausted-trend-tooltip-time" class="trend-tooltip-value">-</span></span>
               <span class="trend-tooltip-divider"></span>
@@ -2958,12 +2961,6 @@ def _render_index_script(
         y: bottom - (point.exhausted / maxY) * plotHeight
       }}));
 
-      const gridValues = [maxY, Math.round(maxY / 2), 0];
-      const gridHtml = gridValues.map((value) => {{
-        const y = bottom - (value / maxY) * plotHeight;
-        return `<line class="trend-grid-line" x1="0" y1="${{formatSvgNumber(y)}}" x2="${{width}}" y2="${{formatSvgNumber(y)}}"></line><text class="trend-axis-label" x="4" y="${{formatSvgNumber(y + 3)}}">${{value}}</text>`;
-      }}).join("");
-
       const labelPoints = chartPoints.length >= 2
         ? [chartPoints[0], chartPoints[Math.floor((chartPoints.length - 1) / 2)], chartPoints[chartPoints.length - 1]]
         : chartPoints;
@@ -2982,8 +2979,6 @@ def _render_index_script(
       svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
       svg.setAttribute("preserveAspectRatio", "none");
       svg.innerHTML = `
-        <title id="exhausted-trend-title">exhausted 数量趋势</title>
-        ${{gridHtml}}
         <rect id="exhausted-trend-hit-layer" class="trend-hit-layer" x="0" y="0" width="${{width}}" height="${{height}}"></rect>
         ${{linePath ? `<path class="trend-line" d="${{linePath}}"></path>` : ""}}
         ${{xLabelHtml}}
