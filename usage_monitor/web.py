@@ -859,13 +859,17 @@ def _render_index_styles() -> str:
       border-top-right-radius: var(--radius-sm);
       border-bottom-right-radius: var(--radius-sm);
     }
-    .summary-card:hover {
+    .summary-card:not(.is-active):hover {
       background: color-mix(in srgb, var(--filter-bg) 62%, #ffffff);
     }
     .summary-card.is-active {
-      border-color: var(--filter-border);
+      border-color: transparent;
+      border-radius: var(--radius-sm);
       background: var(--filter-bg);
       z-index: 1;
+    }
+    .summary-card:has(+ .summary-card.is-active) {
+      border-right-color: transparent;
     }
     .summary-card.is-active::after { opacity: 1; }
     .summary-label {
