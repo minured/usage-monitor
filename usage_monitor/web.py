@@ -421,22 +421,31 @@ def _render_index_styles() -> str:
     return """
     :root {
       color-scheme: light;
-      --bg: #f6f5f1;
+      --bg: #eef3f7;
       --panel: #ffffff;
-      --panel-muted: #faf9f6;
-      --line: #dedbd2;
-      --line-strong: #c9c4b8;
-      --text: #171717;
-      --muted: #5f5b52;
-      --muted-soft: #817b70;
-      --focus: #44403a;
-      --focus-shadow: 0 0 0 3px rgba(68, 64, 58, 0.18);
-      --active: #047857;
-      --invalid: #b42318;
-      --missing: #a16207;
-      --available: #047857;
-      --exhausted: #c2410c;
-      --unknown: #57534e;
+      --panel-muted: #f8fafc;
+      --line: #d7dee8;
+      --line-strong: #b8c2d0;
+      --text: #172033;
+      --muted: #536173;
+      --muted-soft: #738094;
+      --primary: #253043;
+      --primary-hover: #172033;
+      --focus: #0f766e;
+      --focus-shadow: 0 0 0 3px rgba(15, 118, 110, 0.18);
+      --active: #0f766e;
+      --invalid: #dc2626;
+      --missing: #b45309;
+      --available: #16a34a;
+      --exhausted: #f97316;
+      --unknown: #64748b;
+      --filter-total: #334155;
+      --filter-active: #0f766e;
+      --filter-available: #16a34a;
+      --filter-exhausted: #f97316;
+      --filter-unknown: #64748b;
+      --filter-invalid: #dc2626;
+      --filter-missing: #b45309;
       --radius: 8px;
       --radius-sm: 6px;
       --shadow: 0 1px 2px rgba(23, 23, 23, 0.04);
@@ -491,7 +500,7 @@ def _render_index_styles() -> str:
       transform: translateY(-160%);
       padding: 6px 8px;
       border-radius: var(--radius-sm);
-      background: var(--text);
+      background: var(--primary);
       color: #fff;
       text-decoration: none;
       transition: transform 140ms ease;
@@ -593,16 +602,16 @@ def _render_index_styles() -> str:
       align-items: center;
       justify-content: center;
       min-height: 30px;
-      border: 1px solid var(--text);
+      border: 1px solid var(--primary);
       border-radius: var(--radius-sm);
       padding: 0 10px;
-      background: var(--text);
+      background: var(--primary);
       color: #fff;
       font-weight: 650;
       cursor: pointer;
       transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, opacity 140ms ease;
     }
-    .action-button:hover { background: #292524; border-color: #292524; }
+    .action-button:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
     .action-button-secondary {
       background: #fff;
       border-color: var(--line-strong);
@@ -652,13 +661,13 @@ def _render_index_styles() -> str:
       height: 6px;
       overflow: hidden;
       border-radius: 999px;
-      background: #e7e5df;
+      background: #dbe3ee;
     }
     .progress-bar {
       height: 100%;
       width: 0;
       border-radius: inherit;
-      background: #57534e;
+      background: var(--primary);
       transition: width 160ms ease;
     }
     .run-meta {
@@ -682,6 +691,10 @@ def _render_index_styles() -> str:
       min-width: 0;
       color: var(--text);
       font-weight: 680;
+    }
+    #progress-next-round.is-countdown {
+      color: var(--filter-active);
+      font-variant-numeric: tabular-nums;
     }
     .run-account b {
       display: inline-block;
@@ -747,6 +760,9 @@ def _render_index_styles() -> str:
       gap: 0;
     }
     .summary-card {
+      --filter-accent: var(--filter-total);
+      --filter-bg: #f1f5f9;
+      --filter-border: #cbd5e1;
       appearance: none;
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -754,28 +770,44 @@ def _render_index_styles() -> str:
       gap: 8px;
       min-width: 0;
       min-height: 50px;
-      padding: 8px 10px;
+      padding: 8px 10px 8px 8px;
       border: 0;
       border-right: 1px solid var(--line);
-      border-top: 2px solid transparent;
+      border-left: 3px solid var(--filter-accent);
       border-radius: 0;
       background: #fff;
       color: var(--text);
       text-align: left;
       cursor: pointer;
-      transition: background-color 140ms ease, border-color 140ms ease;
+      transition: background-color 140ms ease, box-shadow 140ms ease;
     }
+    .summary-card-total,
+    .sticky-filter-all,
+    .table-filter-all { --filter-accent: var(--filter-total); --filter-bg: #f1f5f9; --filter-border: #cbd5e1; }
+    .summary-card-active,
+    .sticky-filter-active,
+    .table-filter-active { --filter-accent: var(--filter-active); --filter-bg: #ecfdf5; --filter-border: #a7f3d0; }
+    .summary-card-available,
+    .sticky-filter-available,
+    .table-filter-available { --filter-accent: var(--filter-available); --filter-bg: #f0fdf4; --filter-border: #bbf7d0; }
+    .summary-card-exhausted,
+    .sticky-filter-exhausted,
+    .table-filter-exhausted { --filter-accent: var(--filter-exhausted); --filter-bg: #fff7ed; --filter-border: #fed7aa; }
+    .summary-card-unknown,
+    .sticky-filter-unknown,
+    .table-filter-unknown { --filter-accent: var(--filter-unknown); --filter-bg: #f8fafc; --filter-border: #cbd5e1; }
+    .summary-card-invalid,
+    .sticky-filter-invalid,
+    .table-filter-invalid { --filter-accent: var(--filter-invalid); --filter-bg: #fef2f2; --filter-border: #fecaca; }
+    .summary-card-source_missing,
+    .sticky-filter-source_missing,
+    .table-filter-source_missing { --filter-accent: var(--filter-missing); --filter-bg: #fffbeb; --filter-border: #fde68a; }
     .summary-card:last-child { border-right: 0; }
-    .summary-card:hover { background: #fbfaf7; }
+    .summary-card:hover,
     .summary-card.is-active {
-      border-top-color: var(--text);
-      background: #f7f4ed;
+      background: var(--filter-bg);
+      box-shadow: inset 0 0 0 1px var(--filter-border);
     }
-    .summary-card-available.is-active,
-    .summary-card-active.is-active { border-top-color: var(--available); }
-    .summary-card-exhausted.is-active { border-top-color: var(--exhausted); }
-    .summary-card-invalid.is-active { border-top-color: var(--invalid); }
-    .summary-card-source_missing.is-active { border-top-color: var(--missing); }
     .summary-label {
       min-width: 0;
       color: var(--muted);
@@ -786,7 +818,7 @@ def _render_index_styles() -> str:
       white-space: nowrap;
     }
     .summary-value {
-      color: var(--text);
+      color: var(--filter-accent);
       font-size: 18px;
       line-height: 1;
       font-weight: 760;
@@ -819,7 +851,11 @@ def _render_index_styles() -> str:
       font-weight: 640;
       white-space: nowrap;
     }
-    .table-filter-pill { color: var(--text); }
+    .table-filter-pill {
+      border-color: var(--filter-border, var(--line));
+      background: var(--filter-bg, #fff);
+      color: var(--filter-accent, var(--text));
+    }
     .sticky-table-shell {
       position: fixed;
       top: 0;
@@ -865,22 +901,22 @@ def _render_index_styles() -> str:
       justify-content: center;
       min-height: 22px;
       padding: 0 8px;
-      border: 1px solid var(--line);
+      border: 1px solid var(--filter-border);
+      border-left: 3px solid var(--filter-accent);
       border-radius: var(--radius-sm);
       background: #fff;
-      color: var(--muted);
+      color: var(--filter-accent);
       font-size: 11px;
       font-weight: 650;
       line-height: 1;
       white-space: nowrap;
       cursor: pointer;
-      transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+      transition: background-color 140ms ease, box-shadow 140ms ease;
     }
     .sticky-filter-chip:hover,
     .sticky-filter-chip.is-active {
-      border-color: var(--line-strong);
-      background: #f7f4ed;
-      color: var(--text);
+      background: var(--filter-bg);
+      box-shadow: inset 0 0 0 1px var(--filter-border);
     }
     .sticky-table-scroll { overflow: hidden; background: #fff; }
     .sticky-table,
@@ -1026,7 +1062,7 @@ def _render_index_styles() -> str:
       height: 5px;
       overflow: hidden;
       border-radius: 999px;
-      background: #e7e5df;
+      background: #dbe3ee;
     }
     .remaining-fill {
       display: block;
@@ -1039,9 +1075,16 @@ def _render_index_styles() -> str:
     .remaining-cell.is-empty .remaining-fill { width: 0 !important; background: #a8a29e; }
     .cell-time { display: flex; flex-direction: column; gap: 1px; }
     .cell-time-date,
-    .cell-time-clock { display: block; white-space: nowrap; }
+    .cell-time-clock,
+    .cell-time-countdown { display: block; white-space: nowrap; }
     .cell-time-date { color: var(--text); font-weight: 650; }
     .cell-time-clock { color: var(--muted); font-size: 11px; }
+    .cell-time-countdown {
+      color: var(--filter-active);
+      font-size: 11px;
+      font-weight: 680;
+      font-variant-numeric: tabular-nums;
+    }
     .status-pill {
       display: inline-flex;
       align-items: center;
@@ -1391,7 +1434,7 @@ def _render_index_script(
     const TABLE_CARD_BREAKPOINT = 900;
     const MOBILE_LAYOUT_BREAKPOINT = 768;
     const TABLE_COLUMN_COUNT = {_TABLE_COLUMN_COUNT};
-    const STICKY_QUICK_FILTERS = ["all", "active", "available", "exhausted", "invalid"];
+    const STICKY_QUICK_FILTERS = ["all", "active", "available", "exhausted", "unknown", "invalid", "source_missing"];
     const initialDashboardPayload = {initial_dashboard_js};
     const initialProgressPayload = {initial_progress_js};
     const state = {{
@@ -1409,6 +1452,8 @@ def _render_index_script(
       items: Array.isArray(initialDashboardPayload.items) ? initialDashboardPayload.items : [],
       summary: {{}},
       dashboardRevision: Number(initialDashboardPayload.accounts_revision || 0),
+      nextRoundAtUtc: String(initialProgressPayload.next_round_at_utc || ""),
+      nextRoundCountdownEnabled: String(initialProgressPayload.phase || "") === "sleeping",
       lastRenderedMode: ""
     }};
 
@@ -1590,6 +1635,97 @@ def _render_index_script(
       return shortDate || text;
     }}
 
+
+    // 倒计时只依赖服务端返回的 UTC 时间；前端本地刷新，不增加接口压力。
+    function parseUtcMillis(value) {{
+      const text = String(value || "").trim();
+      if (!text) {{
+        return null;
+      }}
+      const millis = Date.parse(text);
+      return Number.isFinite(millis) ? millis : null;
+    }}
+
+    function pad2(value) {{
+      return String(Math.max(0, Math.floor(value))).padStart(2, "0");
+    }}
+
+    function formatDurationSeconds(totalSeconds) {{
+      const safeSeconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+      const hours = Math.floor(safeSeconds / 3600);
+      const minutes = Math.floor((safeSeconds % 3600) / 60);
+      const seconds = safeSeconds % 60;
+      if (hours > 0) {{
+        return `${{hours}}:${{pad2(minutes)}}:${{pad2(seconds)}}`;
+      }}
+      return `${{pad2(minutes)}}:${{pad2(seconds)}}`;
+    }}
+
+    function formatDurationSecondsFromNow(value) {{
+      const targetMillis = parseUtcMillis(value);
+      if (targetMillis === null) {{
+        return "";
+      }}
+      return formatDurationSeconds(Math.ceil((targetMillis - Date.now()) / 1000));
+    }}
+
+    function formatDurationMinutesFromNow(value) {{
+      const targetMillis = parseUtcMillis(value);
+      if (targetMillis === null) {{
+        return "";
+      }}
+      const remainingMs = targetMillis - Date.now();
+      if (remainingMs <= 0) {{
+        return "已重置";
+      }}
+      const totalMinutes = Math.max(1, Math.ceil(remainingMs / 60000));
+      const days = Math.floor(totalMinutes / 1440);
+      const hours = Math.floor((totalMinutes % 1440) / 60);
+      const minutes = totalMinutes % 60;
+      if (days > 0) {{
+        return `剩 ${{days}}天 ${{hours}}小时`;
+      }}
+      if (hours > 0) {{
+        return `剩 ${{hours}}小时 ${{minutes}}分`;
+      }}
+      return `剩 ${{minutes}}分`;
+    }}
+
+    function refreshNextRoundCountdown() {{
+      const element = document.getElementById("progress-next-round");
+      if (!element) {{
+        return;
+      }}
+      const target = String(state.nextRoundAtUtc || "").trim();
+      const enabled = Boolean(state.nextRoundCountdownEnabled && target);
+      element.classList.toggle("is-countdown", enabled);
+      element.title = formatUtcToShanghai(target, "");
+      if (!target) {{
+        element.textContent = "-";
+        return;
+      }}
+      if (enabled) {{
+        const countdown = formatDurationSecondsFromNow(target);
+        element.textContent = countdown || "即将开始";
+        return;
+      }}
+      element.textContent = formatCompactDateTimeText(target);
+    }}
+
+    function refreshResetCountdowns() {{
+      document.querySelectorAll("[data-reset-countdown]").forEach((element) => {{
+        const target = element.getAttribute("data-countdown-target") || "";
+        const countdown = formatDurationMinutesFromNow(target);
+        element.textContent = countdown || "-";
+        element.setAttribute("title", formatUtcToShanghai(target, "") || "-");
+      }});
+    }}
+
+    function refreshLiveCountdowns() {{
+      refreshNextRoundCountdown();
+      refreshResetCountdowns();
+    }}
+
     function formatProgressPercent(value) {{
       const parsed = Number(value);
       if (!Number.isFinite(parsed)) {{
@@ -1638,7 +1774,10 @@ def _render_index_script(
     }}
 
     function updateTableMeta(count = 0) {{
-      document.getElementById("table-summary-filter").textContent = `filter: ${{labels.filter[state.filter] || state.filter}}`;
+      const currentFilter = String(state.filter || "all");
+      const filterElement = document.getElementById("table-summary-filter");
+      filterElement.textContent = `filter: ${{labels.filter[currentFilter] || currentFilter}}`;
+      filterElement.className = `table-filter-pill table-filter-${{currentFilter}}`;
       document.getElementById("table-row-count").textContent = `${{count}} 条`;
     }}
 
@@ -1662,11 +1801,15 @@ def _render_index_script(
       `;
     }}
 
-    function renderDateTimeCell(value) {{
-      const text = formatUtcToShanghai(value, "");
+    function renderDateTimeCell(value, withCountdown = false) {{
+      const target = String(value || "").trim();
+      const text = formatUtcToShanghai(target, "");
       if (!text || text === "-") {{
         return '<div class="cell-time"><span class="cell-time-date">-</span></div>';
       }}
+      const countdownHtml = withCountdown
+        ? `<span class="cell-time-countdown" data-reset-countdown data-countdown-target="${{escapeHtml(target)}}">${{escapeHtml(formatDurationMinutesFromNow(target) || "-")}}</span>`
+        : "";
       const parts = text.split(" ");
       if (parts.length >= 2) {{
         const datePart = parts[0] || "-";
@@ -1675,10 +1818,11 @@ def _render_index_script(
           <div class="cell-time">
             <span class="cell-time-date">${{escapeHtml(datePart)}}</span>
             <span class="cell-time-clock">${{escapeHtml(timePart)}}</span>
+            ${{countdownHtml}}
           </div>
         `;
       }}
-      return `<div class="cell-time"><span class="cell-time-date">${{escapeHtml(text)}}</span></div>`;
+      return `<div class="cell-time"><span class="cell-time-date">${{escapeHtml(text)}}</span>${{countdownHtml}}</div>`;
     }}
 
     function renderMobileMetric(label, value, extraClass = "") {{
@@ -1688,6 +1832,18 @@ def _render_index_script(
         <span class="mobile-metric">
           <span class="mobile-metric-label">${{escapeHtml(label)}}</span>
           <span class="${{className}}" title="${{escapeHtml(text)}}">${{escapeHtml(text)}}</span>
+        </span>
+      `;
+    }}
+
+    function renderMobileResetMetric(value) {{
+      const target = String(value || "").trim();
+      const text = formatDurationMinutesFromNow(target) || formatCompactDateTimeText(target);
+      const title = formatUtcToShanghai(target, "") || text;
+      return `
+        <span class="mobile-metric">
+          <span class="mobile-metric-label">重</span>
+          <span class="mobile-metric-value mono" data-reset-countdown data-countdown-target="${{escapeHtml(target)}}" title="${{escapeHtml(title)}}">${{escapeHtml(text)}}</span>
         </span>
       `;
     }}
@@ -1704,7 +1860,6 @@ def _render_index_script(
 
       const rows = items.map((item) => {{
         const remainingText = item.remaining_percent_text || "-";
-        const resetText = formatCompactDateTimeText(item.reset_at_utc || "");
         const checkedText = formatCompactDateTimeText(item.last_checked_at_utc || "");
         const extraParts = [];
         if (item.note && String(item.note).trim() && String(item.note).trim() !== "-") {{
@@ -1724,7 +1879,7 @@ def _render_index_script(
                     ${{renderPlanTag(item.plan_type)}}
                   </div>
                   ${{renderMobileMetric("余", remainingText, "is-primary")}}
-                  ${{renderMobileMetric("重", resetText, "mono")}}
+                  ${{renderMobileResetMetric(item.reset_at_utc || "")}}
                   ${{renderMobileMetric("查", checkedText, "mono")}}
                 </div>
               </div>
@@ -1737,6 +1892,7 @@ def _render_index_script(
         `;
       }}).join("");
       container.innerHTML = rows;
+      refreshResetCountdowns();
     }}
 
     function renderStickyQuickFilters(summary = state.summary || {{}}) {{
@@ -1752,7 +1908,7 @@ def _render_index_script(
         return `
           <button
             type="button"
-            class="sticky-filter-chip${{active ? " is-active" : ""}}"
+            class="sticky-filter-chip sticky-filter-${{filterKey}}${{active ? " is-active" : ""}}"
             data-sticky-filter="${{filterKey}}"
             aria-pressed="${{active ? "true" : "false"}}"
             aria-label="快捷筛选 ${{label}}，当前${{count}}条"
@@ -2300,7 +2456,9 @@ def _render_index_script(
       sourceElement.textContent = sourceText;
       sourceElement.title = payload.current_source_file || "";
       document.getElementById("progress-started").textContent = formatUtcToShanghai(payload.round_started_at_utc);
-      document.getElementById("progress-next-round").textContent = formatCompactDateTimeText(payload.next_round_at_utc || "");
+      state.nextRoundAtUtc = String(payload.next_round_at_utc || "");
+      state.nextRoundCountdownEnabled = phase === "sleeping";
+      refreshNextRoundCountdown();
       document.getElementById("progress-heartbeat").textContent = formatUtcToShanghai(payload.last_heartbeat_at_utc);
       document.getElementById("progress-finished").textContent = formatUtcToShanghai(payload.round_finished_at_utc);
       setProgressNote(payload.last_error_detail || "", phase === "error");
@@ -2498,7 +2656,7 @@ def _render_index_script(
           </td>
           <td data-label="剩余" class="col-remaining">${{renderRemainingCell(item)}}</td>
           <td data-label="重置时间" class="mono col-reset">
-            ${{renderDateTimeCell(item.reset_at_utc || "")}}
+            ${{renderDateTimeCell(item.reset_at_utc || "", true)}}
           </td>
           <td data-label="最近查询" class="mono col-last-checked">
             ${{renderDateTimeCell(item.last_checked_at_utc || "")}}
@@ -2509,6 +2667,7 @@ def _render_index_script(
         </tr>
       `).join("");
       tbody.innerHTML = rows;
+      refreshResetCountdowns();
       window.requestAnimationFrame(syncStickyHeaderLayout);
     }}
 
@@ -2623,6 +2782,8 @@ def _render_index_script(
     syncFilterSelectionState();
     applyProgressPayload(initialProgressPayload);
     updateControlButtons(initialProgressPayload);
+    refreshLiveCountdowns();
+    window.setInterval(refreshLiveCountdowns, 1000);
     window.requestAnimationFrame(syncStickyHeaderLayout);
     connectEventStream(false);
   """.strip()
