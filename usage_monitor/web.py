@@ -1607,7 +1607,7 @@ def _render_index_header() -> str:
             <span><strong id="exhausted-trend-current">-</strong> <span id="exhausted-trend-time">-</span></span>
           </div>
           <div id="exhausted-trend-canvas" class="summary-trend-canvas">
-            <svg id="exhausted-trend-chart" class="trend-chart" viewBox="0 0 640 160" role="img" aria-labelledby="exhausted-trend-title"></svg>
+            <svg id="exhausted-trend-chart" class="trend-chart" viewBox="0 0 640 160" preserveAspectRatio="none" role="img" aria-labelledby="exhausted-trend-title"></svg>
             <div id="exhausted-trend-tooltip" class="trend-floating-tooltip" hidden aria-hidden="true">
               <span class="trend-tooltip-pair"><span class="trend-tooltip-label">时间</span><span id="exhausted-trend-tooltip-time" class="trend-tooltip-value">-</span></span>
               <span class="trend-tooltip-divider"></span>
@@ -2980,6 +2980,7 @@ def _render_index_script(
 
       const linePath = buildSmoothTrendPath(chartPoints);
       svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
+      svg.setAttribute("preserveAspectRatio", "none");
       svg.innerHTML = `
         <title id="exhausted-trend-title">exhausted 数量趋势</title>
         ${{gridHtml}}
