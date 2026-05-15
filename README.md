@@ -217,7 +217,8 @@ Compose 行为：
 - `GET /`
   - 返回运维页面
 - `GET /api/dashboard?filter=all|active|available|exhausted|unknown|invalid|source_missing`
-  - 返回总览和列表 JSON
+  - 返回总览、列表 JSON，以及 `exhausted_history` 趋势点
+  - `exhausted_history` 从服务上线后的账号状态变化开始记录，用于前端绘制 exhausted 数量折线图
   - Web 进程内会按 `accounts_revision` 复用已编码响应，账号数据变化后立即失效
 - `GET /api/progress`
   - 返回当前采集轮次进度 JSON，供调试或外部调用使用

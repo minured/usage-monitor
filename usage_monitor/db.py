@@ -29,7 +29,18 @@ from .timeutil import utc_now_iso
 
 TABLE_NAME = "accounts_latest"
 RUNTIME_TABLE_NAME = "collector_runtime"
+SUMMARY_HISTORY_TABLE_NAME = "summary_history"
 RUNTIME_KEY = "collector"
+SUMMARY_HISTORY_LIMIT = 96
+SUMMARY_KEYS = (
+    "total",
+    "active",
+    "available",
+    "exhausted",
+    "unknown",
+    "invalid",
+    "source_missing",
+)
 FILTERS = {
     "all",
     "active",
@@ -98,6 +109,19 @@ CREATE TABLE IF NOT EXISTS {RUNTIME_TABLE_NAME} (
     last_error_detail TEXT,
     last_heartbeat_at_utc TEXT NOT NULL,
     updated_at_utc TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS {SUMMARY_HISTORY_TABLE_NAME} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at_utc TEXT NOT NULL,
+    accounts_revision INTEGER NOT NULL DEFAULT 0,
+    total INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 0,
+    available INTEGER NOT NULL DEFAULT 0,
+    exhausted INTEGER NOT NULL DEFAULT 0,
+    unknown INTEGER NOT NULL DEFAULT 0,
+    invalid INTEGER NOT NULL DEFAULT 0,
+    source_missing INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -221,7 +245,9 @@ class UsageDatabase:
                 conn.executescript(SCHEMA)
                 self._ensure_accounts_schema(conn)
                 self._ensure_runtime_schema(conn)
+                self._ensure_summary_history_schema(conn)
                 self._ensure_indexes(conn)
+                self._seed_summary_history_if_empty(conn)
                 conn.commit()
 
             self._initialized_paths.add(cache_key)
@@ -315,6 +341,25 @@ class UsageDatabase:
             )
 
     @staticmethod
+    def _ensure_summary_history_schema(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {SUMMARY_HISTORY_TABLE_NAME} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                captured_at_utc TEXT NOT NULL,
+                accounts_revision INTEGER NOT NULL DEFAULT 0,
+                total INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 0,
+                available INTEGER NOT NULL DEFAULT 0,
+                exhausted INTEGER NOT NULL DEFAULT 0,
+                unknown INTEGER NOT NULL DEFAULT 0,
+                invalid INTEGER NOT NULL DEFAULT 0,
+                source_missing INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+
+    @staticmethod
     def _ensure_indexes(conn: sqlite3.Connection) -> None:
         conn.executescript(
             f"""
@@ -341,7 +386,93 @@ class UsageDatabase:
                 updated_at_utc DESC,
                 email ASC
             );
+
+            CREATE INDEX IF NOT EXISTS idx_summary_history_captured
+            ON {SUMMARY_HISTORY_TABLE_NAME} (id DESC, captured_at_utc DESC);
             """
+        )
+
+    def _fetch_summary_counts_in_transaction(self, conn: sqlite3.Connection) -> dict[str, int]:
+        summary_row = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN lifecycle_status = ? THEN 1 ELSE 0 END) AS active,
+                SUM(CASE WHEN lifecycle_status = ? AND quota_status = ? THEN 1 ELSE 0 END) AS available,
+                SUM(CASE WHEN lifecycle_status = ? AND quota_status = ? THEN 1 ELSE 0 END) AS exhausted,
+                SUM(CASE WHEN lifecycle_status = ? AND quota_status = ? THEN 1 ELSE 0 END) AS unknown,
+                SUM(CASE WHEN lifecycle_status = ? THEN 1 ELSE 0 END) AS invalid,
+                SUM(CASE WHEN lifecycle_status = ? THEN 1 ELSE 0 END) AS source_missing
+            FROM {TABLE_NAME}
+            """,
+            (
+                LIFECYCLE_ACTIVE,
+                LIFECYCLE_ACTIVE,
+                QUOTA_AVAILABLE,
+                LIFECYCLE_ACTIVE,
+                QUOTA_EXHAUSTED,
+                LIFECYCLE_ACTIVE,
+                QUOTA_UNKNOWN,
+                LIFECYCLE_INVALID,
+                LIFECYCLE_SOURCE_MISSING,
+            ),
+        ).fetchone()
+        return {key: int(summary_row[key] or 0) for key in SUMMARY_KEYS}
+
+    def _insert_summary_history_snapshot_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        summary: dict[str, int],
+    ) -> None:
+        runtime_row = self._ensure_runtime_row_in_transaction(conn)
+        conn.execute(
+            f"""
+            INSERT INTO {SUMMARY_HISTORY_TABLE_NAME} (
+                captured_at_utc,
+                accounts_revision,
+                total,
+                active,
+                available,
+                exhausted,
+                unknown,
+                invalid,
+                source_missing
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                utc_now_iso(),
+                int(runtime_row["accounts_revision"] or 0),
+                *(int(summary.get(key) or 0) for key in SUMMARY_KEYS),
+            ),
+        )
+
+    def _record_summary_history_if_changed_in_transaction(self, conn: sqlite3.Connection) -> None:
+        summary = self._fetch_summary_counts_in_transaction(conn)
+        latest_row = conn.execute(
+            f"""
+            SELECT exhausted
+            FROM {SUMMARY_HISTORY_TABLE_NAME}
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if latest_row is not None and int(latest_row["exhausted"] or 0) == int(summary["exhausted"]):
+            return
+        self._insert_summary_history_snapshot_in_transaction(conn, summary)
+
+    def _seed_summary_history_if_empty(self, conn: sqlite3.Connection) -> None:
+        existing_count = int(
+            conn.execute(f"SELECT COUNT(*) FROM {SUMMARY_HISTORY_TABLE_NAME}").fetchone()[0] or 0
+        )
+        if existing_count > 0:
+            return
+        account_count = int(conn.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}").fetchone()[0] or 0)
+        if account_count <= 0:
+            return
+        self._insert_summary_history_snapshot_in_transaction(
+            conn,
+            self._fetch_summary_counts_in_transaction(conn),
         )
 
     def ping(self) -> None:
@@ -364,6 +495,7 @@ class UsageDatabase:
                 (str(dimension_key or ""),),
             )
             self._bump_accounts_revision_in_transaction(conn)
+            self._record_summary_history_if_changed_in_transaction(conn)
             conn.commit()
 
     def upsert_account(self, payload: dict[str, Any]) -> None:
@@ -397,6 +529,7 @@ class UsageDatabase:
             self._ensure_runtime_row_in_transaction(conn)
             conn.execute(sql, values)
             self._bump_accounts_revision_in_transaction(conn)
+            self._record_summary_history_if_changed_in_transaction(conn)
             conn.commit()
 
     def upsert_runtime(self, payload: dict[str, Any]) -> None:
@@ -446,6 +579,30 @@ class UsageDatabase:
         if row is None:
             return None
         return {key: row[key] for key in row.keys()}
+
+    def fetch_exhausted_history(self, limit: int = SUMMARY_HISTORY_LIMIT) -> list[dict[str, Any]]:
+        try:
+            safe_limit = int(limit)
+        except (TypeError, ValueError):
+            safe_limit = SUMMARY_HISTORY_LIMIT
+        safe_limit = max(1, min(safe_limit, 1000))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT captured_at_utc, exhausted
+                FROM {SUMMARY_HISTORY_TABLE_NAME}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+        return [
+            {
+                "captured_at_utc": str(row["captured_at_utc"] or ""),
+                "exhausted": int(row["exhausted"] or 0),
+            }
+            for row in reversed(rows)
+        ]
 
     def fetch_dashboard(self, filter_name: str = "all") -> tuple[dict[str, int], list[sqlite3.Row]]:
         current_filter = filter_name if filter_name in FILTERS else "all"

@@ -189,6 +189,36 @@ class UsageMonitorTestCase(unittest.TestCase):
             build_dimension_key(account_id, plan_type, chatgpt_user_id or f"user-{account_id}")
         ]
 
+    def _account_payload(
+        self,
+        account_id: str,
+        quota_status: str,
+        *,
+        checked_at: str,
+        lifecycle_status: str = LIFECYCLE_ACTIVE,
+    ) -> dict:
+        return {
+            "account_id": account_id,
+            "email": f"{account_id}@example.com",
+            "source_file": f"/tmp/{account_id}.json",
+            "source_mtime_ns": 1,
+            "lifecycle_status": lifecycle_status,
+            "quota_status": quota_status,
+            "plan_type": "team",
+            "used_percent": 100.0 if quota_status == QUOTA_EXHAUSTED else 10.0,
+            "rate_limit_allowed": 0 if quota_status == QUOTA_EXHAUSTED else 1,
+            "rate_limit_reached": 1 if quota_status == QUOTA_EXHAUSTED else 0,
+            "reset_at_utc": "2026-03-18T01:00:00Z",
+            "last_checked_at_utc": checked_at,
+            "last_success_at_utc": checked_at,
+            "last_http_status": 200,
+            "consecutive_403_count": 0,
+            "invalid_reason_code": None,
+            "invalid_reason_detail": None,
+            "last_error_detail": None,
+            "updated_at_utc": checked_at,
+        }
+
     def test_success_updates_active_and_available(self) -> None:
         self._write_token()
         service = self._build_service(
@@ -638,6 +668,48 @@ class UsageMonitorTestCase(unittest.TestCase):
         source_missing_payload = build_dashboard_payload(self.settings, "source_missing")
         self.assertEqual([item["email"] for item in source_missing_payload["items"]], ["a4@example.com"])
 
+    def test_exhausted_history_records_changes_and_dashboard_returns_it(self) -> None:
+        database = UsageDatabase(self.settings.db_path)
+        database.initialize()
+        self.assertEqual(database.fetch_exhausted_history(), [])
+
+        database.upsert_account(
+            self._account_payload(
+                "hist-1",
+                QUOTA_AVAILABLE,
+                checked_at="2026-03-18T00:00:00Z",
+            )
+        )
+        first_history = database.fetch_exhausted_history()
+        self.assertEqual([point["exhausted"] for point in first_history], [0])
+
+        database.upsert_account(
+            self._account_payload(
+                "hist-1",
+                QUOTA_EXHAUSTED,
+                checked_at="2026-03-18T00:05:00Z",
+            )
+        )
+        second_history = database.fetch_exhausted_history()
+        self.assertEqual([point["exhausted"] for point in second_history], [0, 1])
+
+        database.upsert_account(
+            self._account_payload(
+                "hist-1",
+                QUOTA_EXHAUSTED,
+                checked_at="2026-03-18T00:10:00Z",
+            )
+        )
+        self.assertEqual(database.fetch_exhausted_history(), second_history)
+
+        payload = build_dashboard_payload(self.settings, "all", database)
+        overview_payload = build_dashboard_overview_payload(self.settings, "all", database)
+        self.assertEqual(
+            [point["exhausted"] for point in payload["exhausted_history"]],
+            [0, 1],
+        )
+        self.assertEqual(overview_payload["exhausted_history"], payload["exhausted_history"])
+
     def test_dashboard_overview_payload_omits_items(self) -> None:
         database = UsageDatabase(self.settings.db_path)
         database.initialize()
@@ -699,6 +771,7 @@ class UsageMonitorTestCase(unittest.TestCase):
             "accounts_revision": 8,
             "filter": "active",
             "summary": {"total": 2, "active": 1, "available": 0, "exhausted": 1, "unknown": 0, "invalid": 1, "source_missing": 0},
+            "exhausted_history": [{"captured_at_utc": "2026-03-18T00:05:00Z", "exhausted": 1}],
             "items": [
                 {
                     "dimension_key": "acct-2::team::user-2",
@@ -721,6 +794,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(patch_payload["filter"], "active")
         self.assertEqual(patch_payload["generated_at"], "2026-03-18T00:05:00Z")
         self.assertEqual(patch_payload["accounts_revision"], 8)
+        self.assertEqual(patch_payload["exhausted_history"], [{"captured_at_utc": "2026-03-18T00:05:00Z", "exhausted": 1}])
         self.assertEqual(patch_payload["removed_dimension_keys"], ["acct-1::team::user-1"])
         self.assertEqual([item["dimension_key"] for item in patch_payload["upserted_items"]], ["acct-2::team::user-2"])
 

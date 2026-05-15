@@ -287,9 +287,11 @@ def build_dashboard_payload(
     accounts_revision = 0
     summary: dict[str, int] = {}
     rows: list[Any] = []
+    exhausted_history: list[dict[str, Any]] = []
     for _ in range(3):
         before_state = database.fetch_change_state()
         summary, rows = database.fetch_dashboard(current_filter)
+        exhausted_history = database.fetch_exhausted_history()
         after_state = database.fetch_change_state()
         accounts_revision = int(after_state["accounts_revision"])
         if accounts_revision == int(before_state["accounts_revision"]):
@@ -335,6 +337,7 @@ def build_dashboard_payload(
         "accounts_revision": accounts_revision,
         "filter": current_filter,
         "summary": summary,
+        "exhausted_history": exhausted_history,
         "items": items,
     }
 
@@ -350,6 +353,7 @@ def build_dashboard_overview_payload(
         "accounts_revision": dashboard_payload["accounts_revision"],
         "filter": dashboard_payload["filter"],
         "summary": dashboard_payload["summary"],
+        "exhausted_history": dashboard_payload.get("exhausted_history") or [],
     }
 
 
@@ -382,6 +386,7 @@ def build_dashboard_patch_payload(
         "accounts_revision": int(current_payload.get("accounts_revision") or 0),
         "filter": str(current_payload.get("filter") or ""),
         "summary": current_payload.get("summary") or {},
+        "exhausted_history": current_payload.get("exhausted_history") or [],
         "upserted_items": upserted_items,
         "removed_dimension_keys": removed_dimension_keys,
     }
@@ -762,6 +767,25 @@ def _render_index_styles() -> str:
     .availability-rate.is-high { --rate-color: var(--filter-available); }
     .availability-rate.is-medium { --rate-color: var(--filter-exhausted); }
     .availability-rate.is-low { --rate-color: var(--filter-invalid); }
+    .summary-trend-toggle {
+      appearance: none;
+      margin-left: auto;
+      min-height: 26px;
+      padding: 0 8px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-sm);
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      cursor: pointer;
+      transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+    }
+    .summary-trend-toggle:hover {
+      border-color: color-mix(in srgb, var(--filter-exhausted) 34%, var(--line-strong));
+      background: #fff7ed;
+      color: var(--text);
+    }
     .summary {
       display: grid;
       grid-template-columns: repeat(7, minmax(0, 1fr));
@@ -890,6 +914,79 @@ def _render_index_styles() -> str:
       white-space: nowrap;
       font-variant-numeric: tabular-nums;
     }
+    .summary-trend {
+      display: grid;
+      gap: 6px;
+      padding: 8px 10px 10px;
+      border-top: 1px solid rgba(215, 222, 232, 0.64);
+      background: linear-gradient(180deg, #fff 0%, #fffaf5 100%);
+    }
+    .summary-trend[hidden] { display: none !important; }
+    .summary-trend-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 20px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .summary-trend-meta strong {
+      color: var(--filter-exhausted);
+      font-size: 16px;
+      line-height: 1;
+      font-weight: 760;
+      font-variant-numeric: tabular-nums;
+    }
+    .summary-trend-meta > span:last-child {
+      overflow: hidden;
+      text-align: right;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .summary-trend-canvas {
+      position: relative;
+      min-height: 154px;
+      overflow: hidden;
+      border: 1px solid rgba(251, 146, 60, 0.16);
+      border-radius: var(--radius-sm);
+      background: #fff;
+    }
+    .trend-chart {
+      display: block;
+      width: 100%;
+      height: 154px;
+    }
+    .trend-grid-line { stroke: #ece8e1; stroke-width: 1; }
+    .trend-axis-label {
+      fill: #8a8177;
+      font-size: 10px;
+      font-weight: 620;
+    }
+    .trend-area { fill: url(#exhaustedTrendFill); }
+    .trend-line {
+      fill: none;
+      stroke: var(--filter-exhausted);
+      stroke-width: 2.4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .trend-point {
+      fill: #fff;
+      stroke: var(--filter-exhausted);
+      stroke-width: 2;
+    }
+    .trend-empty {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding-top: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      pointer-events: none;
+    }
+    .trend-empty[hidden] { display: none !important; }
     .panel {
       position: relative;
       isolation: isolate;
@@ -1367,6 +1464,9 @@ def _render_index_styles() -> str:
       .run-account b { max-width: 190px; }
       .summary-card { min-height: 44px; padding: 7px 8px; }
       .summary-value { font-size: 16px; }
+      .summary-trend { padding: 7px 8px 8px; }
+      .summary-trend-canvas { min-height: 132px; }
+      .trend-chart { height: 132px; }
       .panel-head,
       .section-heading { min-height: 34px; padding: 7px 8px; }
       .table-filter-pill,
@@ -1447,8 +1547,19 @@ def _render_index_header() -> str:
               <strong id="availability-rate-value">-</strong>
             </span>
           </div>
+          <button id="summary-trend-toggle" type="button" class="summary-trend-toggle" aria-controls="summary-trend-panel" aria-expanded="true">隐藏趋势</button>
         </div>
         <section id="summary" class="summary" aria-label="账号汇总"></section>
+        <section id="summary-trend-panel" class="summary-trend" aria-label="exhausted 数量趋势">
+          <div class="summary-trend-meta">
+            <span>exhausted trend</span>
+            <span><strong id="exhausted-trend-current">-</strong> <span id="exhausted-trend-time">-</span></span>
+          </div>
+          <div class="summary-trend-canvas">
+            <svg id="exhausted-trend-chart" class="trend-chart" viewBox="0 0 640 160" role="img" aria-labelledby="exhausted-trend-title"></svg>
+            <div id="exhausted-trend-empty" class="trend-empty" hidden>等待更多变化</div>
+          </div>
+        </section>
       </section>
     </div>
   """.strip()
@@ -1546,6 +1657,8 @@ def _render_index_script(
       sortDirection: "desc",
       items: Array.isArray(initialDashboardPayload.items) ? initialDashboardPayload.items : [],
       summary: {{}},
+      exhaustedHistory: Array.isArray(initialDashboardPayload.exhausted_history) ? initialDashboardPayload.exhausted_history : [],
+      summaryTrendVisible: true,
       dashboardRevision: Number(initialDashboardPayload.accounts_revision || 0),
       nextRoundAtUtc: String(initialProgressPayload.next_round_at_utc || ""),
       nextRoundCountdownEnabled: String(initialProgressPayload.phase || "") === "sleeping",
@@ -1556,6 +1669,7 @@ def _render_index_script(
     const lifecycleOrder = {lifecycle_order_js};
     const quotaOrder = {quota_order_js};
     const urlPrefix = {url_prefix_js};
+    const SUMMARY_TREND_STORAGE_KEY = "usage-monitor.summaryTrendVisible";
     const labels = {{
       lifecycle: {{
         active: "active",
@@ -2247,6 +2361,7 @@ def _render_index_script(
         state.summary = payload.summary || {{}};
         renderStickyQuickFilters(state.summary);
       }}
+      updateExhaustedHistory(payload.exhausted_history);
       updateGeneratedAt(payload.generated_at || "");
       showError("");
       setDashboardBusy(false);
@@ -2273,6 +2388,7 @@ def _render_index_script(
       if (!areSummaryEqual(nextSummary, state.summary || {{}})) {{
         renderSummary(nextSummary);
       }}
+      updateExhaustedHistory(payload.exhausted_history);
 
       const upsertedItems = Array.isArray(payload.upserted_items) ? payload.upserted_items : [];
       const removedDimensionKeys = Array.isArray(payload.removed_dimension_keys) ? payload.removed_dimension_keys : [];
@@ -2658,6 +2774,191 @@ def _render_index_script(
       rateElement.title = `available / active = ${{available}} / ${{active}}`;
     }}
 
+    function readSummaryTrendPreference() {{
+      try {{
+        return window.localStorage.getItem(SUMMARY_TREND_STORAGE_KEY) !== "0";
+      }} catch (_error) {{
+        return true;
+      }}
+    }}
+
+    function writeSummaryTrendPreference(visible) {{
+      try {{
+        window.localStorage.setItem(SUMMARY_TREND_STORAGE_KEY, visible ? "1" : "0");
+      }} catch (_error) {{
+        // localStorage 可能被浏览器隐私设置禁用；忽略即可，不影响图表功能。
+      }}
+    }}
+
+    function setSummaryTrendVisible(visible, persist = false) {{
+      state.summaryTrendVisible = Boolean(visible);
+      const panel = document.getElementById("summary-trend-panel");
+      const button = document.getElementById("summary-trend-toggle");
+      if (panel) {{
+        panel.hidden = !state.summaryTrendVisible;
+      }}
+      if (button) {{
+        button.textContent = state.summaryTrendVisible ? "隐藏趋势" : "显示趋势";
+        button.setAttribute("aria-expanded", state.summaryTrendVisible ? "true" : "false");
+      }}
+      if (persist) {{
+        writeSummaryTrendPreference(state.summaryTrendVisible);
+      }}
+      if (state.summaryTrendVisible) {{
+        renderExhaustedTrend();
+      }}
+    }}
+
+    function normalizeExhaustedHistory(history) {{
+      if (!Array.isArray(history)) {{
+        return [];
+      }}
+      return history
+        .map((point) => {{
+          const capturedAt = String((point && (point.captured_at_utc || point.captured_at)) || "").trim();
+          const millis = parseUtcMillis(capturedAt);
+          const exhausted = Number((point && point.exhausted) || 0);
+          if (millis === null || !Number.isFinite(exhausted)) {{
+            return null;
+          }}
+          return {{
+            capturedAt,
+            millis,
+            exhausted: Math.max(0, Math.round(exhausted))
+          }};
+        }})
+        .filter(Boolean)
+        .sort((left, right) => left.millis - right.millis);
+    }}
+
+    function getNiceTrendMax(value) {{
+      const maxValue = Math.max(1, Math.ceil(Number(value) || 1));
+      const step = maxValue <= 5 ? 1 : maxValue <= 20 ? 5 : maxValue <= 50 ? 10 : 25;
+      return Math.max(step, Math.ceil(maxValue / step) * step);
+    }}
+
+    function formatSvgNumber(value) {{
+      const text = Number(value).toFixed(2);
+      return text.replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+    }}
+
+    function buildSmoothTrendPath(points) {{
+      if (!points.length) {{
+        return "";
+      }}
+      if (points.length === 1) {{
+        return `M ${{formatSvgNumber(points[0].x)}} ${{formatSvgNumber(points[0].y)}}`;
+      }}
+      let path = `M ${{formatSvgNumber(points[0].x)}} ${{formatSvgNumber(points[0].y)}}`;
+      for (let index = 0; index < points.length - 1; index += 1) {{
+        const p0 = points[index - 1] || points[index];
+        const p1 = points[index];
+        const p2 = points[index + 1];
+        const p3 = points[index + 2] || p2;
+        const cp1x = p1.x + (p2.x - p0.x) / 6;
+        const cp1y = p1.y + (p2.y - p0.y) / 6;
+        const cp2x = p2.x - (p3.x - p1.x) / 6;
+        const cp2y = p2.y - (p3.y - p1.y) / 6;
+        path += ` C ${{formatSvgNumber(cp1x)}} ${{formatSvgNumber(cp1y)}}, ${{formatSvgNumber(cp2x)}} ${{formatSvgNumber(cp2y)}}, ${{formatSvgNumber(p2.x)}} ${{formatSvgNumber(p2.y)}}`;
+      }}
+      return path;
+    }}
+
+    function renderExhaustedTrend(history = state.exhaustedHistory) {{
+      const svg = document.getElementById("exhausted-trend-chart");
+      const empty = document.getElementById("exhausted-trend-empty");
+      const current = document.getElementById("exhausted-trend-current");
+      const time = document.getElementById("exhausted-trend-time");
+      if (!svg) {{
+        return;
+      }}
+
+      const points = normalizeExhaustedHistory(history);
+      const latest = points[points.length - 1] || null;
+      if (current) {{
+        current.textContent = latest ? String(latest.exhausted) : "-";
+      }}
+      if (time) {{
+        time.textContent = latest ? formatCompactDateTimeText(latest.capturedAt) : "-";
+      }}
+      if (empty) {{
+        empty.hidden = points.length >= 2;
+        empty.textContent = points.length === 0 ? "暂无趋势数据" : "等待更多变化";
+      }}
+
+      const width = 640;
+      const height = 160;
+      const pad = {{ left: 34, right: 14, top: 14, bottom: 26 }};
+      const plotWidth = width - pad.left - pad.right;
+      const plotHeight = height - pad.top - pad.bottom;
+      const bottom = pad.top + plotHeight;
+      const maxY = getNiceTrendMax(Math.max(...points.map((point) => point.exhausted), 1));
+      const minMillis = points.length ? points[0].millis : Date.now();
+      const maxMillis = points.length ? points[points.length - 1].millis : minMillis;
+      const spanMillis = Math.max(1, maxMillis - minMillis);
+      const hasTimeSpan = points.length > 1 && maxMillis > minMillis;
+      const chartPoints = points.map((point, index) => ({{
+        ...point,
+        x: points.length === 1
+          ? pad.left + plotWidth / 2
+          : hasTimeSpan
+            ? pad.left + ((point.millis - minMillis) / spanMillis) * plotWidth
+            : pad.left + (index / Math.max(points.length - 1, 1)) * plotWidth,
+        y: bottom - (point.exhausted / maxY) * plotHeight
+      }}));
+
+      const gridValues = [maxY, Math.round(maxY / 2), 0];
+      const gridHtml = gridValues.map((value) => {{
+        const y = bottom - (value / maxY) * plotHeight;
+        return `<line class="trend-grid-line" x1="${{pad.left}}" y1="${{formatSvgNumber(y)}}" x2="${{width - pad.right}}" y2="${{formatSvgNumber(y)}}"></line><text class="trend-axis-label" x="4" y="${{formatSvgNumber(y + 3)}}">${{value}}</text>`;
+      }}).join("");
+
+      const labelPoints = chartPoints.length >= 2
+        ? [chartPoints[0], chartPoints[Math.floor((chartPoints.length - 1) / 2)], chartPoints[chartPoints.length - 1]]
+        : chartPoints;
+      const usedLabelKeys = new Set();
+      const xLabelHtml = labelPoints.map((point) => {{
+        const key = `${{Math.round(point.x)}}-${{point.capturedAt}}`;
+        if (usedLabelKeys.has(key)) {{
+          return "";
+        }}
+        usedLabelKeys.add(key);
+        const anchor = point.x < pad.left + 40 ? "start" : point.x > width - pad.right - 40 ? "end" : "middle";
+        return `<text class="trend-axis-label" x="${{formatSvgNumber(point.x)}}" y="${{height - 7}}" text-anchor="${{anchor}}">${{escapeHtml(formatCompactDateTimeText(point.capturedAt))}}</text>`;
+      }}).join("");
+
+      const linePath = buildSmoothTrendPath(chartPoints);
+      const areaPath = chartPoints.length
+        ? `${{linePath}} L ${{formatSvgNumber(chartPoints[chartPoints.length - 1].x)}} ${{bottom}} L ${{formatSvgNumber(chartPoints[0].x)}} ${{bottom}} Z`
+        : "";
+      const pointHtml = chartPoints.map((point) => (
+        `<circle class="trend-point" cx="${{formatSvgNumber(point.x)}}" cy="${{formatSvgNumber(point.y)}}" r="3"><title>${{escapeHtml(`${{formatCompactDateTimeText(point.capturedAt)}} · exhausted ${{point.exhausted}}`)}}</title></circle>`
+      )).join("");
+
+      svg.innerHTML = `
+        <title id="exhausted-trend-title">exhausted 数量趋势</title>
+        <defs>
+          <linearGradient id="exhaustedTrendFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#f97316" stop-opacity="0.18"></stop>
+            <stop offset="100%" stop-color="#f97316" stop-opacity="0.02"></stop>
+          </linearGradient>
+        </defs>
+        <rect x="0" y="0" width="${{width}}" height="${{height}}" fill="#fff"></rect>
+        ${{gridHtml}}
+        ${{areaPath ? `<path class="trend-area" d="${{areaPath}}"></path>` : ""}}
+        ${{linePath ? `<path class="trend-line" d="${{linePath}}"></path>` : ""}}
+        ${{pointHtml}}
+        ${{xLabelHtml}}
+      `;
+    }}
+
+    function updateExhaustedHistory(history) {{
+      if (Array.isArray(history)) {{
+        state.exhaustedHistory = history;
+      }}
+      renderExhaustedTrend();
+    }}
+
     function renderSummary(summary) {{
       state.summary = summary || {{}};
       const totalElement = document.getElementById("toolbar-total");
@@ -2870,6 +3171,10 @@ def _render_index_script(
       setActiveFilter(nextFilter);
     }});
 
+    document.getElementById("summary-trend-toggle").addEventListener("click", () => {{
+      setSummaryTrendVisible(!state.summaryTrendVisible, true);
+    }});
+
     document.addEventListener("click", (event) => {{
       const button = event.target.closest(".sort-button[data-sort-key]");
       if (!button) {{
@@ -2937,6 +3242,7 @@ def _render_index_script(
           renderSortButtons();
         }}
         syncStickyHeaderLayout();
+        renderExhaustedTrend();
       }},
       {{ passive: true }}
     );
@@ -2946,6 +3252,7 @@ def _render_index_script(
     }});
 
     // 初始化
+    setSummaryTrendVisible(readSummaryTrendPreference(), false);
     applyDashboardSnapshot(initialDashboardPayload);
     syncFilterSelectionState();
     applyProgressPayload(initialProgressPayload);
