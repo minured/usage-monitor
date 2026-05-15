@@ -823,6 +823,56 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(official_payload["summary"]["exhausted"], 0)
         self.assertEqual(official_payload["items"], [])
 
+    def test_cpa_active_does_not_unexhaust_account_before_official_reset(self) -> None:
+        database = UsageDatabase(self.settings.db_path)
+        database.initialize()
+        exhausted_payload = self._account_payload(
+            "a1",
+            QUOTA_EXHAUSTED,
+            checked_at="2026-03-18T00:00:00Z",
+        )
+        # 使用遥远的未来时间，确保测试不依赖运行当天日期。
+        exhausted_payload["reset_at_utc"] = "9999-12-31T23:59:59Z"
+        database.upsert_account(exhausted_payload)
+        database.upsert_account(
+            self._account_payload(
+                "a2",
+                QUOTA_AVAILABLE,
+                checked_at="2026-03-18T00:01:00Z",
+            )
+        )
+
+        database.sync_cpa_statuses(
+            [
+                {
+                    "source_file_name": "a1.json",
+                    "email": "a1@example.com",
+                    "quota_status": QUOTA_AVAILABLE,
+                    "reset_at_utc": None,
+                    "cpa_status": "active",
+                    "cpa_status_message": "",
+                },
+                {
+                    "source_file_name": "a2.json",
+                    "email": "a2@example.com",
+                    "quota_status": QUOTA_AVAILABLE,
+                    "reset_at_utc": None,
+                    "cpa_status": "active",
+                    "cpa_status_message": "",
+                },
+            ],
+            cpa_stale_seconds=120,
+        )
+
+        cpa_settings = replace(self.settings, cpa_status_enabled=True, cpa_status_stale_seconds=120)
+        payload = build_dashboard_payload(cpa_settings, "exhausted", database)
+
+        self.assertEqual(payload["summary"]["available"], 1)
+        self.assertEqual(payload["summary"]["exhausted"], 1)
+        self.assertEqual([item["email"] for item in payload["items"]], ["a1@example.com"])
+        self.assertEqual(payload["items"][0]["quota_status"], QUOTA_EXHAUSTED)
+        self.assertEqual(payload["items"][0]["reset_at_utc"], "9999-12-31T23:59:59Z")
+
     def test_dashboard_overview_payload_omits_items(self) -> None:
         database = UsageDatabase(self.settings.db_path)
         database.initialize()

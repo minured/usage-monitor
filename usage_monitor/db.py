@@ -430,34 +430,63 @@ class UsageDatabase:
     @classmethod
     def _effective_accounts_sql(cls, cpa_stale_seconds: float | None) -> tuple[str, tuple[Any, ...]]:
         cutoff_utc = cls._cpa_cutoff_utc(cpa_stale_seconds)
+        now_utc = format_utc(utc_now())
         freshness_expr = (
             "lifecycle_status = ? "
             "AND cpa_synced_at_utc IS NOT NULL "
             "AND cpa_synced_at_utc >= ? "
             "AND cpa_quota_status IN (?, ?, ?)"
         )
+        # CPA 的 active 是运行时瞬态状态；官方扫描已耗尽且 reset 未到时，
+        # 不允许它把账号反向冲成 available，避免刷新 auth 文件时出现假恢复。
+        sticky_exhausted_expr = (
+            "quota_status = ? "
+            "AND reset_at_utc IS NOT NULL "
+            "AND reset_at_utc != '' "
+            "AND reset_at_utc > ?"
+        )
         freshness_params: tuple[Any, ...] = (
             LIFECYCLE_ACTIVE,
             cutoff_utc,
             *CPA_QUOTA_VALUES,
         )
+        sticky_exhausted_params: tuple[Any, ...] = (QUOTA_EXHAUSTED, now_utc)
+        exhausted_literal = QUOTA_EXHAUSTED.replace("'", "''")
         sql = f"""
             SELECT
-                *,
+                base.*,
                 CASE
-                    WHEN {freshness_expr} THEN cpa_quota_status
-                    ELSE quota_status
+                    WHEN base.cpa_status_is_fresh
+                        AND base.cpa_quota_status = '{exhausted_literal}'
+                    THEN base.cpa_quota_status
+                    WHEN base.cpa_status_is_fresh
+                        AND NOT base.official_exhausted_still_waiting
+                    THEN base.cpa_quota_status
+                    ELSE base.quota_status
                 END AS effective_quota_status,
                 CASE
-                    WHEN {freshness_expr}
-                        AND cpa_reset_at_utc IS NOT NULL
-                        AND cpa_reset_at_utc != ''
-                    THEN cpa_reset_at_utc
-                    ELSE reset_at_utc
+                    WHEN base.cpa_status_is_fresh
+                        AND base.cpa_quota_status = '{exhausted_literal}'
+                        AND base.cpa_reset_at_utc IS NOT NULL
+                        AND base.cpa_reset_at_utc != ''
+                    THEN base.cpa_reset_at_utc
+                    WHEN base.official_exhausted_still_waiting
+                    THEN base.reset_at_utc
+                    WHEN base.cpa_status_is_fresh
+                        AND base.cpa_reset_at_utc IS NOT NULL
+                        AND base.cpa_reset_at_utc != ''
+                    THEN base.cpa_reset_at_utc
+                    ELSE base.reset_at_utc
                 END AS effective_reset_at_utc
-            FROM {TABLE_NAME}
+            FROM (
+                SELECT
+                    *,
+                    ({freshness_expr}) AS cpa_status_is_fresh,
+                    ({sticky_exhausted_expr}) AS official_exhausted_still_waiting
+                FROM {TABLE_NAME}
+            ) AS base
         """
-        return sql, freshness_params + freshness_params
+        return sql, freshness_params + sticky_exhausted_params
 
     def _fetch_summary_counts_in_transaction(
         self,
