@@ -892,6 +892,18 @@ def _render_index_styles() -> str:
       font-weight: 760;
       letter-spacing: -0.03em;
     }
+    .summary-card.has-subtext .summary-label {
+      align-self: end;
+    }
+    .summary-card.has-subtext .summary-value {
+      grid-row: 1 / 3;
+      align-self: center;
+    }
+    .summary-card.has-subtext .summary-subtext {
+      grid-column: 1 / 2;
+      grid-row: 2;
+      align-self: start;
+    }
     .summary-subtext {
       grid-column: 1 / -1;
       min-width: 0;
@@ -2680,10 +2692,11 @@ def _render_index_script(
       const html = order.map((key) => {{
         const filterKey = key === "total" ? "all" : key;
         const active = filterKey === state.filter;
+        const hasSubtext = key === "exhausted";
         return `
         <button
           type="button"
-          class="summary-card summary-card-${{key}}${{active ? " is-active" : ""}}"
+          class="summary-card summary-card-${{key}}${{hasSubtext ? " has-subtext" : ""}}${{active ? " is-active" : ""}}"
           data-filter="${{filterKey}}"
           aria-pressed="${{active ? "true" : "false"}}"
           title="${{escapeHtml(summaryDescriptions[key] || labels.summary[key] || key)}}"
