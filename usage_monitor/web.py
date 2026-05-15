@@ -707,7 +707,7 @@ def _render_index_styles() -> str:
     }
     .summary-block {
       display: grid;
-      overflow: hidden;
+      overflow: visible;
       border-color: rgba(184, 194, 208, 0.62);
       box-shadow: none;
     }
@@ -948,7 +948,7 @@ def _render_index_styles() -> str:
     .summary-trend-canvas {
       position: relative;
       min-height: 154px;
-      overflow: hidden;
+      overflow: visible;
       border: 1px solid rgba(251, 146, 60, 0.16);
       border-radius: var(--radius-sm);
       background: #fff;
@@ -957,7 +957,6 @@ def _render_index_styles() -> str:
       display: block;
       width: 100%;
       height: 154px;
-      cursor: crosshair;
     }
     .trend-grid-line { stroke: #ece8e1; stroke-width: 1; }
     .trend-axis-label {
@@ -984,16 +983,14 @@ def _render_index_styles() -> str:
     .trend-floating-tooltip {
       position: absolute;
       left: 50%;
-      top: 6px;
+      top: 100%;
       z-index: 30;
       display: flex;
       align-items: center;
-      justify-content: center;
       box-sizing: border-box;
-      width: 214px;
-      max-width: calc(100% - 12px);
       gap: 9px;
-      overflow: hidden;
+      width: 220px;
+      margin-top: 4px;
       padding: 5px 9px;
       border: 1px solid rgba(215, 222, 232, 0.84);
       border-radius: 7px;
@@ -1028,7 +1025,6 @@ def _render_index_styles() -> str:
     #exhausted-trend-hover[hidden] { display: none; }
     .trend-hit-layer {
       fill: transparent;
-      cursor: crosshair;
       pointer-events: all;
     }
     .trend-empty {
@@ -2949,7 +2945,7 @@ def _render_index_script(
       const measuredWidth = Math.round(svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 640);
       const width = Math.max(360, measuredWidth);
       const height = 160;
-      const pad = {{ left: 34, right: 14, top: 14, bottom: 26 }};
+      const pad = {{ left: 0, right: 0, top: 14, bottom: 26 }};
       const plotWidth = width - pad.left - pad.right;
       const plotHeight = height - pad.top - pad.bottom;
       const bottom = pad.top + plotHeight;
@@ -2965,7 +2961,7 @@ def _render_index_script(
       const gridValues = [maxY, Math.round(maxY / 2), 0];
       const gridHtml = gridValues.map((value) => {{
         const y = bottom - (value / maxY) * plotHeight;
-        return `<line class="trend-grid-line" x1="${{pad.left}}" y1="${{formatSvgNumber(y)}}" x2="${{width - pad.right}}" y2="${{formatSvgNumber(y)}}"></line><text class="trend-axis-label" x="4" y="${{formatSvgNumber(y + 3)}}">${{value}}</text>`;
+        return `<line class="trend-grid-line" x1="0" y1="${{formatSvgNumber(y)}}" x2="${{width}}" y2="${{formatSvgNumber(y)}}"></line><text class="trend-axis-label" x="4" y="${{formatSvgNumber(y + 3)}}">${{value}}</text>`;
       }}).join("");
 
       const labelPoints = chartPoints.length >= 2
@@ -2978,7 +2974,7 @@ def _render_index_script(
           return "";
         }}
         usedLabelKeys.add(key);
-        const anchor = point.x < pad.left + 40 ? "start" : point.x > width - pad.right - 40 ? "end" : "middle";
+        const anchor = point.x < 40 ? "start" : point.x > width - 40 ? "end" : "middle";
         return `<text class="trend-axis-label" x="${{formatSvgNumber(point.x)}}" y="${{height - 7}}" text-anchor="${{anchor}}">${{escapeHtml(formatCompactDateTimeText(point.capturedAt))}}</text>`;
       }}).join("");
 
@@ -3025,8 +3021,6 @@ def _render_index_script(
         tooltip.hidden = true;
         tooltip.setAttribute("aria-hidden", "true");
         tooltip.style.left = "";
-        tooltip.style.top = "";
-        tooltip.style.bottom = "";
       }}
       if (restoreLatest) {{
         setExhaustedTrendMeta(getLatestExhaustedTrendPoint());
@@ -3054,20 +3048,9 @@ def _render_index_script(
       const canvasRect = canvas ? canvas.getBoundingClientRect() : svgRect;
       const canvasWidth = canvas ? canvas.clientWidth : svgRect.width;
       const relativeX = (svgRect.left - canvasRect.left) + (point.x / Math.max(geometry.width, 1)) * svgRect.width;
-      const tooltipWidth = Math.min(214, Math.max(120, canvasWidth - 12));
-      const halfWidth = tooltipWidth / 2;
-      const clampedX = canvasWidth > tooltipWidth
-        ? Math.max(halfWidth + 6, Math.min(canvasWidth - halfWidth - 6, relativeX))
-        : canvasWidth / 2;
-      tooltip.style.width = `${{Math.round(tooltipWidth)}}px`;
+      const halfWidth = 110;
+      const clampedX = Math.max(halfWidth, Math.min(canvasWidth - halfWidth, relativeX));
       tooltip.style.left = `${{Math.round(clampedX)}}px`;
-      if (point.y < geometry.height * 0.45) {{
-        tooltip.style.top = "";
-        tooltip.style.bottom = "6px";
-      }} else {{
-        tooltip.style.top = "6px";
-        tooltip.style.bottom = "";
-      }}
     }}
 
     function renderTrendHover(svg, point, geometry) {{
@@ -3103,15 +3086,8 @@ def _render_index_script(
       svg.onpointermove = (event) => {{
         const rect = svg.getBoundingClientRect();
         const ratio = geometry.width / Math.max(rect.width, 1);
-        const x = (event.clientX - rect.left) * ratio;
-        const plotLeft = geometry.pad.left;
-        const plotRight = geometry.width - geometry.pad.right;
-        if (x < plotLeft || x > plotRight) {{
-          clearHover();
-          return;
-        }}
-        const plotRatio = (x - plotLeft) / Math.max(plotRight - plotLeft, 1);
-        const rawIndex = Math.round(plotRatio * (chartPoints.length - 1));
+        const x = Math.max(0, Math.min(geometry.width, (event.clientX - rect.left) * ratio));
+        const rawIndex = Math.round((x / Math.max(geometry.width, 1)) * (chartPoints.length - 1));
         const index = Math.max(0, Math.min(chartPoints.length - 1, rawIndex));
         renderTrendHover(svg, chartPoints[index], geometry);
       }};
