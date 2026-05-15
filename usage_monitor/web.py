@@ -816,6 +816,22 @@ def _render_index_styles() -> str:
       cursor: pointer;
       transition: background-color 140ms ease, color 140ms ease;
     }
+    .summary-card::before {
+      content: "";
+      position: absolute;
+      left: -3px;
+      top: 11px;
+      bottom: 11px;
+      width: 1px;
+      border-radius: 999px;
+      background: rgba(184, 194, 208, 0.54);
+      pointer-events: none;
+    }
+    .summary-card:first-child::before,
+    .summary-card.is-active::before,
+    .summary-card.is-active + .summary-card::before {
+      opacity: 0;
+    }
     .summary-card::after {
       content: "";
       position: absolute;
@@ -960,6 +976,7 @@ def _render_index_styles() -> str:
     }
     .sticky-filter-chip {
       appearance: none;
+      position: relative;
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -975,6 +992,22 @@ def _render_index_styles() -> str:
       white-space: nowrap;
       cursor: pointer;
       transition: background-color 140ms ease, color 140ms ease;
+    }
+    .sticky-filter-chip::before {
+      content: "";
+      position: absolute;
+      left: -3px;
+      top: 5px;
+      bottom: 5px;
+      width: 1px;
+      border-radius: 999px;
+      background: rgba(184, 194, 208, 0.58);
+      pointer-events: none;
+    }
+    .sticky-filter-chip:first-child::before,
+    .sticky-filter-chip.is-active::before,
+    .sticky-filter-chip.is-active + .sticky-filter-chip::before {
+      opacity: 0;
     }
     .sticky-filter-chip:hover,
     .sticky-filter-chip.is-active {
