@@ -33,6 +33,15 @@ RUNTIME_TABLE_NAME = "collector_runtime"
 SUMMARY_HISTORY_TABLE_NAME = "summary_history"
 RUNTIME_KEY = "collector"
 SUMMARY_HISTORY_HOURS = 168
+DEFAULT_CPA_STATUS_STALE_SECONDS = 120.0
+CPA_QUOTA_VALUES = (QUOTA_AVAILABLE, QUOTA_EXHAUSTED, QUOTA_UNKNOWN)
+CPA_STATUS_COLUMN_DEFINITIONS = {
+    "cpa_quota_status": "TEXT",
+    "cpa_reset_at_utc": "TEXT",
+    "cpa_synced_at_utc": "TEXT",
+    "cpa_status": "TEXT",
+    "cpa_status_message": "TEXT",
+}
 SUMMARY_KEYS = (
     "total",
     "active",
@@ -86,6 +95,11 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     invalid_reason_code TEXT,
     invalid_reason_detail TEXT,
     last_error_detail TEXT,
+    cpa_quota_status TEXT,
+    cpa_reset_at_utc TEXT,
+    cpa_synced_at_utc TEXT,
+    cpa_status TEXT,
+    cpa_status_message TEXT,
     updated_at_utc TEXT NOT NULL
 );
 
@@ -176,6 +190,11 @@ CREATE TABLE {TABLE_NAME} (
     invalid_reason_code TEXT,
     invalid_reason_detail TEXT,
     last_error_detail TEXT,
+    cpa_quota_status TEXT,
+    cpa_reset_at_utc TEXT,
+    cpa_synced_at_utc TEXT,
+    cpa_status TEXT,
+    cpa_status_message TEXT,
     updated_at_utc TEXT NOT NULL
 )
 """
@@ -272,6 +291,9 @@ class UsageDatabase:
             conn.execute(
                 f"ALTER TABLE {TABLE_NAME} ADD COLUMN consecutive_401_count INTEGER NOT NULL DEFAULT 0"
             )
+        for column, definition in CPA_STATUS_COLUMN_DEFINITIONS.items():
+            if column not in existing_columns:
+                conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN {column} {definition}")
 
     @classmethod
     def _rebuild_accounts_table(cls, conn: sqlite3.Connection) -> None:
@@ -393,20 +415,71 @@ class UsageDatabase:
             """
         )
 
-    def _fetch_summary_counts_in_transaction(self, conn: sqlite3.Connection) -> dict[str, int]:
+    @staticmethod
+    def _cpa_cutoff_utc(cpa_stale_seconds: float | None) -> str:
+        if cpa_stale_seconds is None:
+            cpa_stale_seconds = DEFAULT_CPA_STATUS_STALE_SECONDS
+        try:
+            stale_seconds = float(cpa_stale_seconds)
+        except (TypeError, ValueError):
+            stale_seconds = DEFAULT_CPA_STATUS_STALE_SECONDS
+        if stale_seconds <= 0:
+            return "9999-12-31T23:59:59Z"
+        return format_utc(utc_now() - timedelta(seconds=stale_seconds))
+
+    @classmethod
+    def _effective_accounts_sql(cls, cpa_stale_seconds: float | None) -> tuple[str, tuple[Any, ...]]:
+        cutoff_utc = cls._cpa_cutoff_utc(cpa_stale_seconds)
+        freshness_expr = (
+            "lifecycle_status = ? "
+            "AND cpa_synced_at_utc IS NOT NULL "
+            "AND cpa_synced_at_utc >= ? "
+            "AND cpa_quota_status IN (?, ?, ?)"
+        )
+        freshness_params: tuple[Any, ...] = (
+            LIFECYCLE_ACTIVE,
+            cutoff_utc,
+            *CPA_QUOTA_VALUES,
+        )
+        sql = f"""
+            SELECT
+                *,
+                CASE
+                    WHEN {freshness_expr} THEN cpa_quota_status
+                    ELSE quota_status
+                END AS effective_quota_status,
+                CASE
+                    WHEN {freshness_expr}
+                        AND cpa_reset_at_utc IS NOT NULL
+                        AND cpa_reset_at_utc != ''
+                    THEN cpa_reset_at_utc
+                    ELSE reset_at_utc
+                END AS effective_reset_at_utc
+            FROM {TABLE_NAME}
+        """
+        return sql, freshness_params + freshness_params
+
+    def _fetch_summary_counts_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        cpa_stale_seconds: float | None = None,
+    ) -> dict[str, int]:
+        effective_sql, effective_params = self._effective_accounts_sql(cpa_stale_seconds)
         summary_row = conn.execute(
             f"""
+            WITH effective_accounts AS ({effective_sql})
             SELECT
                 COUNT(*) AS total,
                 SUM(CASE WHEN lifecycle_status = ? THEN 1 ELSE 0 END) AS active,
-                SUM(CASE WHEN lifecycle_status = ? AND quota_status = ? THEN 1 ELSE 0 END) AS available,
-                SUM(CASE WHEN lifecycle_status = ? AND quota_status = ? THEN 1 ELSE 0 END) AS exhausted,
-                SUM(CASE WHEN lifecycle_status = ? AND quota_status = ? THEN 1 ELSE 0 END) AS unknown,
+                SUM(CASE WHEN lifecycle_status = ? AND effective_quota_status = ? THEN 1 ELSE 0 END) AS available,
+                SUM(CASE WHEN lifecycle_status = ? AND effective_quota_status = ? THEN 1 ELSE 0 END) AS exhausted,
+                SUM(CASE WHEN lifecycle_status = ? AND effective_quota_status = ? THEN 1 ELSE 0 END) AS unknown,
                 SUM(CASE WHEN lifecycle_status = ? THEN 1 ELSE 0 END) AS invalid,
                 SUM(CASE WHEN lifecycle_status = ? THEN 1 ELSE 0 END) AS source_missing
-            FROM {TABLE_NAME}
+            FROM effective_accounts
             """,
             (
+                *effective_params,
                 LIFECYCLE_ACTIVE,
                 LIFECYCLE_ACTIVE,
                 QUOTA_AVAILABLE,
@@ -448,8 +521,12 @@ class UsageDatabase:
             ),
         )
 
-    def _record_summary_history_if_changed_in_transaction(self, conn: sqlite3.Connection) -> None:
-        summary = self._fetch_summary_counts_in_transaction(conn)
+    def _record_summary_history_if_changed_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        cpa_stale_seconds: float | None = None,
+    ) -> None:
+        summary = self._fetch_summary_counts_in_transaction(conn, cpa_stale_seconds)
         latest_row = conn.execute(
             f"""
             SELECT exhausted
@@ -532,6 +609,113 @@ class UsageDatabase:
             self._bump_accounts_revision_in_transaction(conn)
             self._record_summary_history_if_changed_in_transaction(conn)
             conn.commit()
+
+    def sync_cpa_statuses(
+        self,
+        statuses: Iterable[Any],
+        *,
+        cpa_stale_seconds: float | None = None,
+    ) -> dict[str, int]:
+        """同步 CPA 只读状态到 Monitor 自己的 overlay 字段。"""
+
+        by_file: dict[str, dict[str, Any]] = {}
+        by_email: dict[str, dict[str, Any]] = {}
+        total_statuses = 0
+        for status in statuses:
+            payload = status.as_db_payload() if hasattr(status, "as_db_payload") else dict(status)
+            source_file_name = Path(str(payload.get("source_file_name") or "")).name.lower()
+            email = str(payload.get("email") or "").strip().lower()
+            if not source_file_name and not email:
+                continue
+            total_statuses += 1
+            normalized = {
+                "quota_status": str(payload.get("quota_status") or QUOTA_UNKNOWN),
+                "reset_at_utc": payload.get("reset_at_utc"),
+                "cpa_status": str(payload.get("cpa_status") or "unknown"),
+                "cpa_status_message": str(payload.get("cpa_status_message") or ""),
+            }
+            if source_file_name:
+                by_file[source_file_name] = normalized
+            if email:
+                by_email[email] = normalized
+
+        now = utc_now_iso()
+        matched_rows = 0
+        changed_rows = 0
+        cleared_rows = 0
+        with self._connect() as conn:
+            self._ensure_runtime_row_in_transaction(conn)
+            rows = conn.execute(
+                f"""
+                SELECT
+                    dimension_key,
+                    email,
+                    source_file,
+                    lifecycle_status,
+                    cpa_quota_status,
+                    cpa_reset_at_utc,
+                    cpa_synced_at_utc,
+                    cpa_status,
+                    cpa_status_message
+                FROM {TABLE_NAME}
+                """
+            ).fetchall()
+            for row in rows:
+                source_file_name = Path(str(row["source_file"] or "")).name.lower()
+                email = str(row["email"] or "").strip().lower()
+                payload = None
+                if str(row["lifecycle_status"] or "") == LIFECYCLE_ACTIVE:
+                    payload = by_file.get(source_file_name) or by_email.get(email)
+                if payload is not None:
+                    matched_rows += 1
+                    next_values = (
+                        payload["quota_status"],
+                        payload["reset_at_utc"],
+                        now,
+                        payload["cpa_status"],
+                        payload["cpa_status_message"],
+                    )
+                else:
+                    next_values = (None, None, None, None, None)
+                    if row["cpa_synced_at_utc"] is not None:
+                        cleared_rows += 1
+
+                current_values = (
+                    row["cpa_quota_status"],
+                    row["cpa_reset_at_utc"],
+                    row["cpa_synced_at_utc"],
+                    row["cpa_status"],
+                    row["cpa_status_message"],
+                )
+                if current_values == next_values:
+                    continue
+
+                conn.execute(
+                    f"""
+                    UPDATE {TABLE_NAME}
+                    SET
+                        cpa_quota_status = ?,
+                        cpa_reset_at_utc = ?,
+                        cpa_synced_at_utc = ?,
+                        cpa_status = ?,
+                        cpa_status_message = ?
+                    WHERE dimension_key = ?
+                    """,
+                    (*next_values, row["dimension_key"]),
+                )
+                changed_rows += 1
+
+            if changed_rows > 0:
+                self._bump_accounts_revision_in_transaction(conn)
+                self._record_summary_history_if_changed_in_transaction(conn, cpa_stale_seconds)
+            conn.commit()
+
+        return {
+            "statuses": total_statuses,
+            "matched": matched_rows,
+            "changed": changed_rows,
+            "cleared": cleared_rows,
+        }
 
     def upsert_runtime(self, payload: dict[str, Any]) -> None:
         normalized_payload = dict(payload)
@@ -637,22 +821,30 @@ class UsageDatabase:
             )
         return points
 
-    def fetch_dashboard(self, filter_name: str = "all") -> tuple[dict[str, int], list[sqlite3.Row]]:
+    def fetch_dashboard(
+        self,
+        filter_name: str = "all",
+        *,
+        cpa_stale_seconds: float | None = None,
+    ) -> tuple[dict[str, int], list[sqlite3.Row]]:
         current_filter = filter_name if filter_name in FILTERS else "all"
+        effective_sql, effective_params = self._effective_accounts_sql(cpa_stale_seconds)
         with self._connect() as conn:
             summary_row = conn.execute(
                 f"""
+                WITH effective_accounts AS ({effective_sql})
                 SELECT
                     COUNT(*) AS total,
                     SUM(CASE WHEN lifecycle_status = ? THEN 1 ELSE 0 END) AS active,
-                    SUM(CASE WHEN lifecycle_status = ? AND quota_status = ? THEN 1 ELSE 0 END) AS available,
-                    SUM(CASE WHEN lifecycle_status = ? AND quota_status = ? THEN 1 ELSE 0 END) AS exhausted,
-                    SUM(CASE WHEN lifecycle_status = ? AND quota_status = ? THEN 1 ELSE 0 END) AS unknown,
+                    SUM(CASE WHEN lifecycle_status = ? AND effective_quota_status = ? THEN 1 ELSE 0 END) AS available,
+                    SUM(CASE WHEN lifecycle_status = ? AND effective_quota_status = ? THEN 1 ELSE 0 END) AS exhausted,
+                    SUM(CASE WHEN lifecycle_status = ? AND effective_quota_status = ? THEN 1 ELSE 0 END) AS unknown,
                     SUM(CASE WHEN lifecycle_status = ? THEN 1 ELSE 0 END) AS invalid,
                     SUM(CASE WHEN lifecycle_status = ? THEN 1 ELSE 0 END) AS source_missing
-                FROM {TABLE_NAME}
+                FROM effective_accounts
                 """,
                 (
+                    *effective_params,
                     LIFECYCLE_ACTIVE,
                     LIFECYCLE_ACTIVE,
                     QUOTA_AVAILABLE,
@@ -671,7 +863,7 @@ class UsageDatabase:
                 where_clause = "WHERE lifecycle_status = ?"
                 params = (LIFECYCLE_ACTIVE,)
             elif current_filter in {QUOTA_AVAILABLE, QUOTA_EXHAUSTED, QUOTA_UNKNOWN}:
-                where_clause = "WHERE lifecycle_status = ? AND quota_status = ?"
+                where_clause = "WHERE lifecycle_status = ? AND effective_quota_status = ?"
                 params = (LIFECYCLE_ACTIVE, current_filter)
             elif current_filter == LIFECYCLE_INVALID:
                 where_clause = "WHERE lifecycle_status = ?"
@@ -682,26 +874,34 @@ class UsageDatabase:
 
             rows = conn.execute(
                 f"""
+                WITH effective_accounts AS ({effective_sql})
                 SELECT
                     dimension_key,
                     email,
                     lifecycle_status,
-                    quota_status,
+                    quota_status AS official_quota_status,
+                    effective_quota_status AS quota_status,
                     used_percent,
-                    reset_at_utc,
+                    reset_at_utc AS official_reset_at_utc,
+                    effective_reset_at_utc AS reset_at_utc,
                     last_checked_at_utc,
                     invalid_reason_detail,
                     last_error_detail,
                     source_file,
-                    plan_type
-                FROM {TABLE_NAME}
+                    plan_type,
+                    cpa_quota_status,
+                    cpa_reset_at_utc,
+                    cpa_synced_at_utc,
+                    cpa_status,
+                    cpa_status_message
+                FROM effective_accounts
                 {where_clause}
                 ORDER BY
                     last_checked_at_utc DESC,
                     updated_at_utc DESC,
                     email ASC
                 """,
-                tuple(params),
+                (*effective_params, *tuple(params)),
             ).fetchall()
 
         summary = {

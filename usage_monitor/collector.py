@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings, load_settings
+from .cpa_status import CPAStatusClient, CPAStatusError
 from .db import RUNTIME_KEY, UsageDatabase
 from .models import (
     COLLECTOR_PHASE_ERROR,
@@ -119,6 +120,7 @@ class CollectorService:
         settings: Settings,
         database: UsageDatabase | None = None,
         api_client: OpenAIUsageClient | Any | None = None,
+        cpa_status_client: CPAStatusClient | Any | None = None,
         sleeper: Any = time.sleep,
     ):
         self.settings = settings
@@ -127,12 +129,15 @@ class CollectorService:
             timeout=settings.request_timeout_seconds,
             user_agent=settings.user_agent,
         )
+        self.cpa_status_client = cpa_status_client or self._build_cpa_status_client()
+        self._last_cpa_status_sync_monotonic: float | None = None
         self.sleeper = sleeper
         self.runtime_state: dict[str, Any] | None = None
 
     def run_forever(self) -> None:
         while True:
             self._ensure_scheduled_sleep()
+            self._sync_cpa_status_if_due(force=True)
             logger.info(
                 "等待调度时间到达后开始下一轮（sleeping 阶段支持手动触发提前开始）",
             )
@@ -197,6 +202,56 @@ class CollectorService:
         self._mark_reconciling()
         self._mark_source_missing(existing_by_dimension, scanned_dimension_keys, scanned_source_files)
         self._mark_idle()
+        self._sync_cpa_status_if_due(force=True)
+
+    def _build_cpa_status_client(self) -> CPAStatusClient | None:
+        if not self.settings.cpa_status_enabled:
+            return None
+        if not self.settings.cpa_status_url or not self.settings.cpa_management_key:
+            logger.warning("CPA 状态同步已启用，但 URL 或 management key 为空，已跳过")
+            return None
+        return CPAStatusClient(
+            url=self.settings.cpa_status_url,
+            management_key=self.settings.cpa_management_key,
+            timeout=self.settings.cpa_status_timeout_seconds,
+        )
+
+    def _seconds_until_next_cpa_status_sync(self) -> float | None:
+        if self.cpa_status_client is None:
+            return None
+        if self._last_cpa_status_sync_monotonic is None:
+            return 0.0
+        interval = max(float(self.settings.cpa_status_sync_seconds), 5.0)
+        elapsed = time.monotonic() - self._last_cpa_status_sync_monotonic
+        return max(interval - elapsed, 0.0)
+
+    def _sync_cpa_status_if_due(self, *, force: bool = False) -> None:
+        if self.cpa_status_client is None:
+            return
+        remaining = self._seconds_until_next_cpa_status_sync()
+        if not force and remaining is not None and remaining > 0:
+            return
+        self._last_cpa_status_sync_monotonic = time.monotonic()
+        try:
+            self.database.initialize()
+            statuses = self.cpa_status_client.fetch_auth_statuses()
+            result = self.database.sync_cpa_statuses(
+                statuses,
+                cpa_stale_seconds=self.settings.cpa_status_stale_seconds,
+            )
+        except CPAStatusError as exc:
+            logger.warning("CPA 状态同步失败: %s", exc)
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("CPA 状态同步异常")
+            return
+        logger.info(
+            "CPA 状态同步完成：statuses=%s matched=%s changed=%s cleared=%s",
+            result["statuses"],
+            result["matched"],
+            result["changed"],
+            result["cleared"],
+        )
 
     def _select_candidates(
         self,
@@ -701,6 +756,7 @@ class CollectorService:
         poll_interval = max(float(self.settings.manual_trigger_poll_seconds), 0.2)
 
         while True:
+            self._sync_cpa_status_if_due()
             requested_at = self.database.consume_manual_scan_request()
             if requested_at:
                 logger.info("检测到手动触发请求：%s", requested_at)
@@ -715,7 +771,12 @@ class CollectorService:
             remaining_seconds = (next_round_at - utc_now()).total_seconds()
             if remaining_seconds <= 0:
                 return False
-            self.sleeper(min(poll_interval, remaining_seconds))
+
+            sleep_seconds = min(poll_interval, remaining_seconds)
+            cpa_sync_remaining = self._seconds_until_next_cpa_status_sync()
+            if cpa_sync_remaining is not None:
+                sleep_seconds = min(sleep_seconds, max(cpa_sync_remaining, 0.2))
+            self.sleeper(sleep_seconds)
 
     def _sleep_between_accounts(self) -> bool:
         remaining_seconds = max(float(self.settings.per_account_interval_seconds), 0.0)

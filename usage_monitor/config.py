@@ -65,6 +65,17 @@ def _env_float(name: str, default: float, dotenv_values: dict[str, str], minimum
     return max(value, minimum)
 
 
+def _env_bool(name: str, default: bool, dotenv_values: dict[str, str]) -> bool:
+    raw = _env_raw(name, dotenv_values).lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _env_path(name: str, default: Path, dotenv_values: dict[str, str], base_dir: Path) -> Path:
     value = _env_raw(name, dotenv_values)
     if not value:
@@ -102,6 +113,12 @@ class Settings:
     sse_poll_seconds: float = 0.5
     sse_ping_seconds: float = 15.0
     web_gzip_min_bytes: int = 1024
+    cpa_status_enabled: bool = False
+    cpa_status_url: str = ""
+    cpa_management_key: str = ""
+    cpa_status_sync_seconds: float = 30.0
+    cpa_status_timeout_seconds: int = 5
+    cpa_status_stale_seconds: float = 120.0
 
 
 def load_settings() -> Settings:
@@ -179,5 +196,30 @@ def load_settings() -> Settings:
             default=1024,
             dotenv_values=dotenv_values,
             minimum=0,
+        ),
+        cpa_status_enabled=_env_bool(
+            "USAGE_MONITOR_CPA_STATUS_ENABLED",
+            default=False,
+            dotenv_values=dotenv_values,
+        ),
+        cpa_status_url=_env_text("USAGE_MONITOR_CPA_STATUS_URL", "", dotenv_values),
+        cpa_management_key=_env_text("USAGE_MONITOR_CPA_MANAGEMENT_KEY", "", dotenv_values),
+        cpa_status_sync_seconds=_env_float(
+            "USAGE_MONITOR_CPA_STATUS_SYNC_SECONDS",
+            default=30.0,
+            dotenv_values=dotenv_values,
+            minimum=5.0,
+        ),
+        cpa_status_timeout_seconds=_env_int(
+            "USAGE_MONITOR_CPA_STATUS_TIMEOUT_SECONDS",
+            default=5,
+            dotenv_values=dotenv_values,
+            minimum=1,
+        ),
+        cpa_status_stale_seconds=_env_float(
+            "USAGE_MONITOR_CPA_STATUS_STALE_SECONDS",
+            default=120.0,
+            dotenv_values=dotenv_values,
+            minimum=1.0,
         ),
     )

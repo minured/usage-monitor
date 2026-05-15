@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 import gzip
 import json
 import os
@@ -12,6 +13,7 @@ import unittest
 from pathlib import Path
 
 from usage_monitor.collector import CollectorService
+from usage_monitor.cpa_status import parse_auth_file_status
 from usage_monitor.config import DEFAULT_USER_AGENT, Settings
 from usage_monitor.db import UsageDatabase
 from usage_monitor.models import (
@@ -79,6 +81,16 @@ def make_fake_jwt(
         return base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
 
     return f"{_encode_segment(header)}.{_encode_segment(payload)}."
+
+
+class FakeCPAStatusClient:
+    def __init__(self, statuses):
+        self.statuses = statuses
+        self.calls = 0
+
+    def fetch_auth_statuses(self):
+        self.calls += 1
+        return self.statuses
 
 
 class ScriptedClient:
@@ -731,6 +743,85 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(len(payload["exhausted_history"]), 168)
         self.assertEqual(payload["exhausted_history"][-1]["exhausted"], 0)
         self.assertEqual(overview_payload["exhausted_history"], payload["exhausted_history"])
+
+    def test_cpa_auth_file_status_parser_handles_usage_limit(self) -> None:
+        status = parse_auth_file_status(
+            {
+                "name": "codex-two@example.com-free.json",
+                "email": "two@example.com",
+                "status": "error",
+                "status_message": json.dumps(
+                    {
+                        "error": {
+                            "type": "usage_limit_reached",
+                            "message": "The usage limit has been reached",
+                        }
+                    }
+                ),
+                "next_retry_after": "2026-05-20T13:19:21.000018342+08:00",
+            }
+        )
+
+        self.assertEqual(status.source_file_name, "codex-two@example.com-free.json")
+        self.assertEqual(status.email, "two@example.com")
+        self.assertEqual(status.quota_status, QUOTA_EXHAUSTED)
+        self.assertEqual(status.reset_at_utc, "2026-05-20T05:19:21Z")
+        self.assertIn("usage limit", status.cpa_status_message.lower())
+
+    def test_cpa_status_overlay_updates_dashboard_summary(self) -> None:
+        database = UsageDatabase(self.settings.db_path)
+        database.initialize()
+        database.upsert_account(
+            self._account_payload(
+                "a1",
+                QUOTA_AVAILABLE,
+                checked_at="2026-03-18T00:00:00Z",
+            )
+        )
+        database.upsert_account(
+            self._account_payload(
+                "a2",
+                QUOTA_AVAILABLE,
+                checked_at="2026-03-18T00:01:00Z",
+            )
+        )
+
+        result = database.sync_cpa_statuses(
+            [
+                {
+                    "source_file_name": "a1.json",
+                    "email": "a1@example.com",
+                    "quota_status": QUOTA_AVAILABLE,
+                    "reset_at_utc": None,
+                    "cpa_status": "active",
+                    "cpa_status_message": "",
+                },
+                {
+                    "source_file_name": "a2.json",
+                    "email": "a2@example.com",
+                    "quota_status": QUOTA_EXHAUSTED,
+                    "reset_at_utc": "2026-03-19T00:00:00Z",
+                    "cpa_status": "error",
+                    "cpa_status_message": "The usage limit has been reached",
+                },
+            ],
+            cpa_stale_seconds=120,
+        )
+        self.assertEqual(result["matched"], 2)
+
+        cpa_settings = replace(self.settings, cpa_status_enabled=True, cpa_status_stale_seconds=120)
+        payload = build_dashboard_payload(cpa_settings, "exhausted", database)
+
+        self.assertEqual(payload["summary"]["available"], 1)
+        self.assertEqual(payload["summary"]["exhausted"], 1)
+        self.assertEqual([item["email"] for item in payload["items"]], ["a2@example.com"])
+        self.assertEqual(payload["items"][0]["quota_status"], QUOTA_EXHAUSTED)
+        self.assertEqual(payload["items"][0]["remaining_percent_text"], "0%")
+        self.assertEqual(payload["items"][0]["reset_at_utc"], "2026-03-19T00:00:00Z")
+
+        official_payload = build_dashboard_payload(self.settings, "exhausted", database)
+        self.assertEqual(official_payload["summary"]["exhausted"], 0)
+        self.assertEqual(official_payload["items"], [])
 
     def test_dashboard_overview_payload_omits_items(self) -> None:
         database = UsageDatabase(self.settings.db_path)
@@ -1642,6 +1733,37 @@ class UsageMonitorTestCase(unittest.TestCase):
         assert runtime_row is not None
         self.assertEqual(runtime_row["phase"], COLLECTOR_PHASE_SLEEPING)
         self.assertTrue(runtime_row["next_round_at_utc"])
+
+    def test_run_forever_syncs_cpa_status_without_openai_scan(self) -> None:
+        self._write_token(file_name="token0001_demo.json", account_id="acct-1", email="one@example.com")
+        fetch_calls: list[str] = []
+        cpa_client = FakeCPAStatusClient([])
+
+        def fetch_action(record):
+            fetch_calls.append(record.dimension_key)
+            return make_usage_payload(used_percent=12)
+
+        def interrupting_sleeper(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        service = CollectorService(
+            settings=replace(
+                self.settings,
+                cpa_status_enabled=True,
+                cpa_status_url="http://127.0.0.1:8317/v0/management/auth-files",
+                cpa_management_key="test-key",
+                cpa_status_sync_seconds=30,
+            ),
+            api_client=ScriptedClient(fetch_actions={"acct-1": [fetch_action]}),
+            cpa_status_client=cpa_client,
+            sleeper=interrupting_sleeper,
+        )
+
+        with self.assertRaises(KeyboardInterrupt):
+            service.run_forever()
+
+        self.assertEqual(fetch_calls, [])
+        self.assertEqual(cpa_client.calls, 1)
 
     def test_run_once_stops_after_current_record_when_stop_requested_during_processing(self) -> None:
         self._write_token(file_name="token0002_demo.json", account_id="acct-2", email="two@example.com")

@@ -7,6 +7,7 @@
 - 将每个 `account_id + chatgpt_plan_type + chatgpt_user_id` 维度的最新状态写入 SQLite
 - 提供一个极简运维风格页面查看总览和列表
 - 页面顶部支持当前轮次进度查看、手动开始下一轮、手动安全停止本轮
+- 可选只读 CPA auth-files 接口，用 CPA 已知的实时账号状态修正展示时效性
 
 当前版本只保留“最新状态”，不保存历史快照。
 
@@ -25,6 +26,7 @@ usage-monitor/
 └── usage_monitor/
     ├── collector.py
     ├── config.py
+    ├── cpa_status.py
     ├── db.py
     ├── models.py
     ├── openai_api.py
@@ -61,6 +63,15 @@ usage-monitor/
 - 同一三元组维度下如果存在多个 token 文件，只保留较新的那个文件参与本轮采集
 - token JSON 顶层 `type` 字段当前不参与维度计算
 
+CPA 实时状态补充：
+
+- 可选启用 CPA 只读同步后，collector 会定期 `GET /v0/management/auth-files`
+- 该同步只读取 CPA 运行时已知状态，不调用 OpenAI，也不写 CPA 配置、auth 文件或 CPA 数据库
+- CPA 返回 `usage_limit_reached` 时，页面会优先按 `exhausted` 展示
+- CPA 返回 `active` 时，页面会优先按 `available` 展示
+- CPA 状态过期后，页面自动退回 6 小时官方 usage 扫描结果
+- 官方扫描得到的 `used_percent` / `reset_at_utc` 仍会保留，CPA 状态只作为 Monitor 自己数据库中的 overlay 字段
+
 扫描顺序补充：
 
 - 每轮开始前会先基于数据库快照重新排序待查询账号
@@ -92,6 +103,12 @@ cp .env.example .env
 | `USAGE_MONITOR_PER_ACCOUNT_INTERVAL_SECONDS` | `3` | 同一轮内账号之间的间隔 |
 | `USAGE_MONITOR_ROUND_INTERVAL_SECONDS` | `21600` | 整轮结束后的等待时间 |
 | `USAGE_MONITOR_MANUAL_TRIGGER_POLL_SECONDS` | `2` | `sleeping` 阶段检查手动触发请求的轮询间隔 |
+| `USAGE_MONITOR_CPA_STATUS_ENABLED` | `false` | 是否启用 CPA 只读实时状态同步 |
+| `USAGE_MONITOR_CPA_STATUS_URL` | `http://127.0.0.1:8317/v0/management/auth-files` | CPA auth-files 只读接口地址 |
+| `USAGE_MONITOR_CPA_MANAGEMENT_KEY` | `""` | CPA management key，只写入 `.env`，禁止提交 |
+| `USAGE_MONITOR_CPA_STATUS_SYNC_SECONDS` | `30` | CPA 只读状态同步间隔 |
+| `USAGE_MONITOR_CPA_STATUS_TIMEOUT_SECONDS` | `5` | CPA 只读接口请求超时 |
+| `USAGE_MONITOR_CPA_STATUS_STALE_SECONDS` | `120` | CPA 状态 freshness 窗口，过期后退回官方扫描结果 |
 | `USAGE_MONITOR_SSE_POLL_SECONDS` | `0.5` | Web 端检查数据库修订号并触发 SSE 推送的间隔 |
 | `USAGE_MONITOR_SSE_PING_SECONDS` | `15` | SSE 空闲保活间隔 |
 | `USAGE_MONITOR_WEB_GZIP_MIN_BYTES` | `1024` | HTML / JSON 响应启用 gzip 的最小字节数 |
@@ -156,8 +173,10 @@ docker compose up -d --build
 Compose 行为：
 
 - `collector` 读写挂载 `${USAGE_MONITOR_TOKENS_HOST_PATH}`
+- `collector` 使用 host network，便于只读访问宿主机 `127.0.0.1` 上的 CPA 管理接口
 - `web` 和 `collector` 共享 `${USAGE_MONITOR_DATA_HOST_PATH}`
 - `collector` 会把连续两轮最终 `401` 的文件移动到 `${USAGE_MONITOR_AUTH_INVALID_HOST_PATH}`
+- 如启用 CPA 状态同步，`collector` 只读 CPA auth-files，`web` 只读取 Monitor 自己的 SQLite 展示 overlay 后的有效状态
 - `web` 默认仅绑定到 `127.0.0.1:${USAGE_MONITOR_WEB_PORT}`
 - 如果需要挂到子路径，请把 `USAGE_MONITOR_URL_PREFIX` 设成类似 `/usage-monitor`
 

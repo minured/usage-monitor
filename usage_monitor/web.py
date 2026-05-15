@@ -126,6 +126,18 @@ def _int_value(value: Any) -> int:
         return 0
 
 
+def _cpa_dashboard_stale_seconds(settings: Settings) -> float:
+    if not getattr(settings, "cpa_status_enabled", False):
+        return 0.0
+    return max(float(getattr(settings, "cpa_status_stale_seconds", 120.0)), 1.0)
+
+
+def _cpa_cache_bucket(settings: Settings) -> int:
+    if not getattr(settings, "cpa_status_enabled", False):
+        return 0
+    return int(time() // _cpa_dashboard_stale_seconds(settings))
+
+
 def _progress_percent(phase: str, total_candidates: int, processed_candidates: int, round_started_at_utc: str) -> float:
     if total_candidates > 0:
         return round(max(0.0, min(100.0, (processed_candidates / total_candidates) * 100.0)), 1)
@@ -290,7 +302,10 @@ def build_dashboard_payload(
     exhausted_history: list[dict[str, Any]] = []
     for _ in range(3):
         before_state = database.fetch_change_state()
-        summary, rows = database.fetch_dashboard(current_filter)
+        summary, rows = database.fetch_dashboard(
+            current_filter,
+            cpa_stale_seconds=_cpa_dashboard_stale_seconds(settings),
+        )
         exhausted_history = database.fetch_exhausted_history()
         after_state = database.fetch_change_state()
         accounts_revision = int(after_state["accounts_revision"])
@@ -300,13 +315,22 @@ def build_dashboard_payload(
     items: list[dict[str, Any]] = []
     for row in rows:
         source_file = str(row["source_file"] or "")
+        quota_status = str(row["quota_status"] or "")
+        official_quota_status = str(row["official_quota_status"] or quota_status)
         used_percent = row["used_percent"]
-        remaining_percent_value = _remaining_percent_value(used_percent)
-        remaining_percent_text = (
-            _format_remaining_percent(used_percent)
-            if remaining_percent_value is not None
-            else "-"
-        )
+        if quota_status == "exhausted" and official_quota_status != quota_status:
+            remaining_percent_value = 0.0
+            remaining_percent_text = "0%"
+        elif quota_status == "available" and official_quota_status == "exhausted":
+            remaining_percent_value = None
+            remaining_percent_text = "-"
+        else:
+            remaining_percent_value = _remaining_percent_value(used_percent)
+            remaining_percent_text = (
+                _format_remaining_percent(used_percent)
+                if remaining_percent_value is not None
+                else "-"
+            )
         reset_at_utc = str(row["reset_at_utc"] or "")
         last_checked_at_utc = str(row["last_checked_at_utc"] or "")
         note = (
@@ -319,7 +343,7 @@ def build_dashboard_payload(
                 "dimension_key": str(row["dimension_key"] or ""),
                 "email": str(row["email"] or ""),
                 "lifecycle_status": str(row["lifecycle_status"] or ""),
-                "quota_status": str(row["quota_status"] or ""),
+                "quota_status": quota_status,
                 "remaining_percent_text": remaining_percent_text,
                 "remaining_percent_value": remaining_percent_value,
                 "reset_at_utc": reset_at_utc,
@@ -3664,6 +3688,7 @@ def create_app(settings: Settings):
             current_filter,
             int(revisions["accounts_revision"]),
             _current_history_cache_hour(),
+            _cpa_cache_bucket(settings),
         )
         return json_cache.get_or_build(
             cache_key,
@@ -3685,6 +3710,7 @@ def create_app(settings: Settings):
             int(revisions["accounts_revision"]),
             int(revisions["runtime_revision"]),
             _current_history_cache_hour(),
+            _cpa_cache_bucket(settings),
             1 if gzip_enabled else 0,
         )
 
