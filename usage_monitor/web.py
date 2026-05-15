@@ -407,10 +407,9 @@ def _render_table_header_row() -> str:
         if class_name:
             th_attrs.append(f'class="{class_name}"')
         th_attr_text = " " + " ".join(th_attrs)
-        button_class = f"sort-button {class_name}".strip()
         rows.append(
             "              "
-            f'<th{th_attr_text}><button type="button" class="{button_class}" '
+            f'<th{th_attr_text}><button type="button" class="sort-button" '
             f'data-sort-key="{sort_key}" aria-label="按{label}排序">{label}<span class="sort-indicator" aria-hidden="true"></span></button></th>'
         )
     rows.append("            </tr>")
@@ -521,12 +520,12 @@ def _render_index_styles() -> str:
     .page {
       max-width: 1500px;
       margin: 0 auto;
-      padding: 12px 16px 28px;
+      padding: 10px 16px 28px;
     }
     .page-header {
       display: grid;
-      gap: 8px;
-      margin-bottom: 10px;
+      gap: 6px;
+      margin-bottom: 8px;
     }
     .surface,
     .panel,
@@ -538,54 +537,31 @@ def _render_index_styles() -> str:
     }
     .app-toolbar {
       display: grid;
-      grid-template-columns: minmax(180px, 0.8fr) minmax(280px, 1.4fr) auto;
+      grid-template-columns: minmax(148px, auto) minmax(320px, 1fr) auto;
       align-items: center;
-      gap: 12px;
-      min-height: 48px;
-      padding: 8px 10px;
+      gap: 10px;
+      min-height: 42px;
+      padding: 6px 8px 6px 10px;
     }
     .brand-row {
       display: flex;
-      align-items: baseline;
+      align-items: center;
       gap: 8px;
       min-width: 0;
     }
     .title {
       margin: 0;
       color: var(--text);
-      font-size: 16px;
-      line-height: 1.15;
+      font-size: 15px;
+      line-height: 1.1;
       font-weight: 720;
       letter-spacing: -0.02em;
       white-space: nowrap;
     }
-    .toolbar-subtitle {
-      min-width: 0;
-      color: var(--muted);
-      font-size: 12px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .toolbar-stats {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 6px 12px;
-      min-width: 0;
-      color: var(--muted);
-      font-size: 12px;
-    }
+    .toolbar-subtitle,
+    .toolbar-stats,
     .meta-pair {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      white-space: nowrap;
-    }
-    .meta-pair strong,
-    .meta-pair #current-filter {
-      color: var(--text);
-      font-weight: 720;
+      display: none;
     }
     .toolbar-actions,
     .progress-head-actions {
@@ -601,10 +577,10 @@ def _render_index_styles() -> str:
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-height: 30px;
+      min-height: 28px;
       border: 1px solid var(--primary);
       border-radius: var(--radius-sm);
-      padding: 0 10px;
+      padding: 0 9px;
       background: var(--primary);
       color: #fff;
       font-weight: 650;
@@ -627,38 +603,36 @@ def _render_index_styles() -> str:
       opacity: 0.48;
       cursor: not-allowed;
     }
-    .run-strip {
-      display: grid;
-      gap: 6px;
-      padding: 8px 10px;
-    }
     .run-line {
       display: grid;
-      grid-template-columns: auto minmax(160px, 1fr) minmax(360px, auto);
+      grid-template-columns: auto minmax(140px, 1fr) minmax(220px, auto);
       align-items: center;
-      gap: 10px;
+      gap: 8px;
+      min-width: 0;
+    }
+    .toolbar-progress {
       min-width: 0;
     }
     .run-progress-label {
       display: inline-flex;
-      align-items: baseline;
-      gap: 8px;
+      align-items: center;
+      gap: 7px;
       white-space: nowrap;
     }
     .progress-count {
       color: var(--text);
-      font-size: 18px;
+      font-size: 15px;
       line-height: 1;
       font-weight: 760;
       letter-spacing: -0.03em;
     }
     .progress-percent {
       color: var(--muted);
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 650;
     }
     .progress-track {
-      height: 6px;
+      height: 5px;
       overflow: hidden;
       border-radius: 999px;
       background: #dbe3ee;
@@ -675,14 +649,14 @@ def _render_index_styles() -> str:
       flex-wrap: wrap;
       justify-content: flex-end;
       align-items: center;
-      gap: 4px 12px;
+      gap: 3px 10px;
       min-width: 0;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 11px;
     }
     .run-meta-item {
       display: inline-flex;
-      align-items: baseline;
+      align-items: center;
       gap: 4px;
       min-width: 0;
       white-space: nowrap;
@@ -698,7 +672,7 @@ def _render_index_styles() -> str:
     }
     .run-account b {
       display: inline-block;
-      max-width: 260px;
+      max-width: 220px;
       overflow: hidden;
       text-overflow: ellipsis;
       vertical-align: bottom;
@@ -724,7 +698,7 @@ def _render_index_styles() -> str:
       color: var(--invalid);
     }
     .action-note {
-      min-height: 17px;
+      min-height: 0;
     }
     .summary-block {
       display: grid;
@@ -1068,11 +1042,14 @@ def _render_index_styles() -> str:
     }
     .sort-button {
       appearance: none;
+      box-sizing: border-box;
       display: flex;
       align-items: center;
       justify-content: flex-start;
       gap: 4px;
       width: 100%;
+      height: 100%;
+      min-width: 0;
       min-height: 34px;
       padding: 0 10px;
       border: 0;
@@ -1100,7 +1077,7 @@ def _render_index_styles() -> str:
     .col-remaining { width: 132px; min-width: 132px; }
     .col-reset { width: 170px; min-width: 170px; white-space: nowrap; }
     .col-last-checked { width: 150px; min-width: 150px; white-space: nowrap; }
-    .col-note { width: 280px; max-width: 280px; }
+    .col-note { width: 280px; white-space: normal; }
     tbody tr { transition: background-color 120ms ease; }
     tbody tr:hover { background: #fbfaf7; }
     .mono {
@@ -1121,6 +1098,14 @@ def _render_index_styles() -> str:
       color: var(--muted);
       font-size: 12px;
       line-height: 1.35;
+      word-break: break-word;
+    }
+    .cell-note {
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+      white-space: normal;
       word-break: break-word;
     }
     .cell-secondary.is-truncate {
@@ -1340,12 +1325,12 @@ def _render_index_styles() -> str:
     .mobile-account-foot { display: grid; gap: 0; }
     .mobile-account-extra {
       min-width: 0;
-      overflow: hidden;
       color: var(--muted);
       font-size: 11px;
-      line-height: 1.3;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+      white-space: normal;
+      word-break: break-word;
     }
     .mobile-account-extra b { color: var(--text); font-weight: 650; }
     @media (max-width: 1120px) {
@@ -1368,8 +1353,7 @@ def _render_index_styles() -> str:
       body { overflow-x: hidden; }
       .page { padding: 8px; }
       .page-header { gap: 6px; margin-bottom: 8px; }
-      .app-toolbar,
-      .run-strip { padding: 7px 8px; }
+      .app-toolbar { padding: 7px 8px; }
       .brand-row { justify-content: space-between; }
       .toolbar-subtitle { display: none; }
       .toolbar-actions { width: 100%; }
@@ -1416,26 +1400,10 @@ def _render_index_header() -> str:
       <section class="app-toolbar surface" aria-label="usage-monitor 工具栏">
         <div class="brand-row">
           <h1 class="title">usage-monitor</h1>
-          <span class="toolbar-subtitle">账号额度巡检</span>
         </div>
-        <div class="toolbar-stats" aria-label="页面状态">
-          <span class="meta-pair">筛选 <span id="current-filter">active</span></span>
-          <span class="meta-pair">账号 <strong id="toolbar-total">0</strong></span>
-          <span class="meta-pair">更新 <strong>实时</strong></span>
-          <span id="generated-at" hidden>-</span>
-        </div>
-        <div class="toolbar-actions">
-          <span id="progress-phase" class="status-pill status-phase-idle">idle</span>
-          <button id="scan-trigger-button" type="button" class="action-button" disabled>手动开始扫描</button>
-          <button id="scan-stop-button" type="button" class="action-button action-button-danger" disabled>停止本轮</button>
-        </div>
-      </section>
-
-      <div id="error-banner" class="error-banner" role="alert" aria-live="assertive"></div>
-
-      <section class="run-strip surface" aria-label="本轮进度">
-        <div class="run-line">
+        <div class="run-line toolbar-progress" aria-label="本轮进度">
           <div class="run-progress-label">
+            <span id="progress-phase" class="status-pill status-phase-idle">idle</span>
             <strong id="progress-count" class="progress-count">-</strong>
             <span id="progress-percent" class="progress-percent">0%</span>
           </div>
@@ -1443,23 +1411,32 @@ def _render_index_header() -> str:
             <div id="progress-bar" class="progress-bar"></div>
           </div>
           <div class="run-meta" aria-label="进度统计">
-            <span class="run-meta-item">扫描 <b id="progress-total-scanned">-</b></span>
-            <span class="run-meta-item">待查 <b id="progress-total-candidates">-</b></span>
-            <span class="run-meta-item">跳过 <b id="progress-skipped">-</b></span>
             <span class="run-meta-item run-account">当前 <b id="progress-account">-</b></span>
             <span class="run-meta-item">下轮 <b id="progress-next-round">-</b></span>
           </div>
         </div>
-        <div id="progress-subsummary" class="progress-subsummary">等待采集开始</div>
-        <div id="progress-note" class="progress-note" role="status" aria-live="polite"></div>
-        <div id="scan-action-note" class="action-note" role="status" aria-live="polite">空闲或 sleeping 时可手动开始；运行中可点击“停止本轮”安全结束当前轮次。</div>
+        <div class="toolbar-actions">
+          <button id="scan-trigger-button" type="button" class="action-button" disabled>手动开始扫描</button>
+          <button id="scan-stop-button" type="button" class="action-button action-button-danger" disabled>停止本轮</button>
+        </div>
         <div class="hidden-runtime-fields" aria-hidden="true">
+          <span id="current-filter">active</span>
+          <strong id="toolbar-total">0</strong>
+          <span id="generated-at">-</span>
+          <span id="progress-total-scanned">-</span>
+          <span id="progress-total-candidates">-</span>
+          <span id="progress-skipped">-</span>
+          <span id="progress-subsummary" class="progress-subsummary">-</span>
+          <span id="progress-note" class="progress-note" role="status" aria-live="polite"></span>
+          <span id="scan-action-note" class="action-note" role="status" aria-live="polite"></span>
           <span id="progress-source">-</span>
           <span id="progress-started">-</span>
           <span id="progress-heartbeat">-</span>
           <span id="progress-finished">-</span>
         </div>
       </section>
+
+      <div id="error-banner" class="error-banner" role="alert" aria-live="assertive"></div>
 
       <section class="summary-block" aria-labelledby="summary-title">
         <div class="section-heading">
@@ -2852,8 +2829,8 @@ def _render_index_script(
           <td data-label="最近查询" class="mono col-last-checked">
             ${{renderDateTimeCell(item.last_checked_at_utc || "")}}
           </td>
-          <td data-label="备注" class="col-note" title="${{escapeHtml(item.note || "-")}}">
-            <div class="cell-primary">${{escapeHtml(item.note || "-")}}</div>
+          <td data-label="备注" class="col-note">
+            <div class="cell-note">${{escapeHtml(item.note || "-")}}</div>
           </td>
         </tr>
       `).join("");
