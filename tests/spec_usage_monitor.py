@@ -712,7 +712,7 @@ class UsageMonitorTestCase(unittest.TestCase):
                 ("2026-03-18T02:20:00Z",),
             )
         second_history = database.fetch_exhausted_history(hours=4, now_utc="2026-03-18T03:45:00Z")
-        self.assertEqual([point["exhausted"] for point in second_history], [0, 0, 1, 0])
+        self.assertEqual([point["exhausted"] for point in second_history], [0, 0, 1, 1])
 
         database.upsert_account(
             self._account_payload(

@@ -609,22 +609,30 @@ class UsageDatabase:
                 (format_utc(start_bucket_at), format_utc(actual_end_at)),
             ).fetchall()
 
-        bucket_values: dict[Any, int] = {}
+        events: list[tuple[Any, int]] = []
         for row in rows:
             captured_at = parse_utc(str(row["captured_at_utc"] or ""))
-            if captured_at is None:
-                continue
-            bucket_at = captured_at.replace(minute=0, second=0, microsecond=0)
-            # 同一小时有多次采样时，使用该小时内最后一次记录；没有采样的小时保持 0。
-            bucket_values[bucket_at] = max(0, int(row["exhausted"] or 0))
+            if captured_at is not None:
+                events.append((captured_at, max(0, int(row["exhausted"] or 0))))
 
         points: list[dict[str, Any]] = []
+        event_index = 0
+        current_value = 0
         for offset in range(safe_hours):
             bucket_at = start_bucket_at + timedelta(hours=offset)
+            bucket_limit = bucket_at + timedelta(hours=1)
+            if offset == safe_hours - 1:
+                while event_index < len(events) and events[event_index][0] <= actual_end_at:
+                    current_value = int(events[event_index][1])
+                    event_index += 1
+            else:
+                while event_index < len(events) and events[event_index][0] < bucket_limit:
+                    current_value = int(events[event_index][1])
+                    event_index += 1
             points.append(
                 {
                     "captured_at_utc": format_utc(bucket_at),
-                    "exhausted": bucket_values.get(bucket_at, 0),
+                    "exhausted": current_value,
                 }
             )
         return points
