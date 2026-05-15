@@ -754,32 +754,72 @@ def _render_index_styles() -> str:
     .eyebrow,
     .section-description,
     .subtitle { display: none; }
+    .summary-heading-main {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+    .availability-rate {
+      --rate-color: var(--filter-unknown);
+      display: inline-flex;
+      align-items: baseline;
+      gap: 5px;
+      min-height: 24px;
+      padding: 0 8px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--rate-color) 9%, #ffffff);
+      color: var(--rate-color);
+      font-size: 12px;
+      font-weight: 720;
+      white-space: nowrap;
+    }
+    .availability-rate-label {
+      color: var(--muted);
+      font-weight: 640;
+    }
+    .availability-rate.is-high { --rate-color: var(--filter-available); }
+    .availability-rate.is-medium { --rate-color: var(--filter-exhausted); }
+    .availability-rate.is-low { --rate-color: var(--filter-invalid); }
     .summary {
       display: grid;
       grid-template-columns: repeat(7, minmax(0, 1fr));
-      gap: 0;
+      gap: 1px;
+      padding: 1px;
+      background: var(--line);
     }
     .summary-card {
       --filter-accent: var(--filter-total);
       --filter-bg: #f1f5f9;
-      --filter-border: #cbd5e1;
+      --filter-soft: color-mix(in srgb, var(--filter-accent) 8%, #ffffff);
       appearance: none;
+      position: relative;
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
       align-items: baseline;
       gap: 8px;
       min-width: 0;
-      min-height: 50px;
-      padding: 8px 10px 8px 8px;
+      min-height: 48px;
+      padding: 8px 10px;
       border: 0;
-      border-right: 1px solid var(--line);
-      border-left: 3px solid var(--filter-accent);
       border-radius: 0;
       background: #fff;
       color: var(--text);
       text-align: left;
       cursor: pointer;
-      transition: background-color 140ms ease, box-shadow 140ms ease;
+      transition: background-color 140ms ease, color 140ms ease;
+    }
+    .summary-card::after {
+      content: "";
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      bottom: 0;
+      height: 2px;
+      border-radius: 999px 999px 0 0;
+      background: var(--filter-accent);
+      opacity: 0;
+      transition: opacity 140ms ease;
     }
     .summary-card-total,
     .sticky-filter-all,
@@ -802,12 +842,11 @@ def _render_index_styles() -> str:
     .summary-card-source_missing,
     .sticky-filter-source_missing,
     .table-filter-source_missing { --filter-accent: var(--filter-missing); --filter-bg: #fffbeb; --filter-border: #fde68a; }
-    .summary-card:last-child { border-right: 0; }
     .summary-card:hover,
     .summary-card.is-active {
       background: var(--filter-bg);
-      box-shadow: inset 0 0 0 1px var(--filter-border);
     }
+    .summary-card.is-active::after { opacity: 1; }
     .summary-label {
       min-width: 0;
       color: var(--muted);
@@ -852,7 +891,7 @@ def _render_index_styles() -> str:
       white-space: nowrap;
     }
     .table-filter-pill {
-      border-color: var(--filter-border, var(--line));
+      border-color: transparent;
       background: var(--filter-bg, #fff);
       color: var(--filter-accent, var(--text));
     }
@@ -901,22 +940,21 @@ def _render_index_styles() -> str:
       justify-content: center;
       min-height: 22px;
       padding: 0 8px;
-      border: 1px solid var(--filter-border);
-      border-left: 3px solid var(--filter-accent);
+      border: 0;
       border-radius: var(--radius-sm);
-      background: #fff;
+      background: transparent;
       color: var(--filter-accent);
       font-size: 11px;
       font-weight: 650;
       line-height: 1;
       white-space: nowrap;
       cursor: pointer;
-      transition: background-color 140ms ease, box-shadow 140ms ease;
+      transition: background-color 140ms ease, color 140ms ease;
     }
     .sticky-filter-chip:hover,
     .sticky-filter-chip.is-active {
       background: var(--filter-bg);
-      box-shadow: inset 0 0 0 1px var(--filter-border);
+      color: var(--filter-accent);
     }
     .sticky-table-scroll { overflow: hidden; background: #fff; }
     .sticky-table,
@@ -925,6 +963,7 @@ def _render_index_styles() -> str:
       min-width: 1040px;
       border-collapse: separate;
       border-spacing: 0;
+      table-layout: fixed;
     }
     .sticky-table { transform: translateX(0); will-change: transform; }
     .table-wrap {
@@ -986,11 +1025,11 @@ def _render_index_styles() -> str:
       color: var(--text);
       font-weight: 720;
     }
-    .col-email { min-width: 280px; }
-    .col-lifecycle { min-width: 104px; white-space: nowrap; }
-    .col-remaining { min-width: 124px; }
-    .col-reset,
-    .col-last-checked { min-width: 142px; white-space: nowrap; }
+    .col-email { width: 32%; min-width: 280px; }
+    .col-lifecycle { width: 112px; min-width: 112px; white-space: nowrap; }
+    .col-remaining { width: 132px; min-width: 132px; }
+    .col-reset { width: 170px; min-width: 170px; white-space: nowrap; }
+    .col-last-checked { width: 150px; min-width: 150px; white-space: nowrap; }
     .col-note { width: 280px; max-width: 280px; }
     tbody tr { transition: background-color 120ms ease; }
     tbody tr:hover { background: #fbfaf7; }
@@ -1000,9 +1039,12 @@ def _render_index_styles() -> str:
     }
     .cell-primary {
       min-width: 0;
+      max-width: 100%;
       color: var(--text);
       font-weight: 650;
-      word-break: break-word;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .cell-secondary {
       margin-top: 4px;
@@ -1351,7 +1393,13 @@ def _render_index_header() -> str:
 
       <section class="summary-block" aria-labelledby="summary-title">
         <div class="section-heading">
-          <h2 id="summary-title" class="section-title">账号总览</h2>
+          <div class="summary-heading-main">
+            <h2 id="summary-title" class="section-title">账号总览</h2>
+            <span id="availability-rate" class="availability-rate is-medium" title="available / active">
+              <span class="availability-rate-label">可用率</span>
+              <strong id="availability-rate-value">-</strong>
+            </span>
+          </div>
         </div>
         <section id="summary" class="summary" aria-label="账号汇总"></section>
       </section>
@@ -2494,12 +2542,33 @@ def _render_index_script(
       }});
     }}
 
+    function renderAvailabilityRate(summary) {{
+      const rateElement = document.getElementById("availability-rate");
+      const valueElement = document.getElementById("availability-rate-value");
+      if (!rateElement || !valueElement) {{
+        return;
+      }}
+      const active = Number((summary && summary.active) || 0);
+      const available = Number((summary && summary.available) || 0);
+      if (!Number.isFinite(active) || active <= 0) {{
+        valueElement.textContent = "-";
+        rateElement.className = "availability-rate is-medium";
+        rateElement.title = "暂无 active 账号";
+        return;
+      }}
+      const rate = Math.max(0, Math.min(100, (available / active) * 100));
+      valueElement.textContent = `${{rate.toFixed(1)}}%`;
+      rateElement.className = `availability-rate ${{rate >= 80 ? "is-high" : rate >= 50 ? "is-medium" : "is-low"}}`;
+      rateElement.title = `available / active = ${{available}} / ${{active}}`;
+    }}
+
     function renderSummary(summary) {{
       state.summary = summary || {{}};
       const totalElement = document.getElementById("toolbar-total");
       if (totalElement) {{
         totalElement.textContent = String(state.summary.total ?? 0);
       }}
+      renderAvailabilityRate(state.summary);
       const order = ["total", "active", "available", "exhausted", "unknown", "invalid", "source_missing"];
       const html = order.map((key) => {{
         const filterKey = key === "total" ? "all" : key;
