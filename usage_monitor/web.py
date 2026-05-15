@@ -971,11 +971,6 @@ def _render_index_styles() -> str:
       stroke-linecap: round;
       stroke-linejoin: round;
     }
-    .trend-point {
-      fill: #fff;
-      stroke: var(--filter-exhausted);
-      stroke-width: 2;
-    }
     .trend-empty {
       position: absolute;
       inset: 0;
@@ -2886,24 +2881,19 @@ def _render_index_script(
         empty.textContent = points.length === 0 ? "暂无趋势数据" : "等待更多变化";
       }}
 
-      const width = 640;
+      const measuredWidth = Math.round(svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 640);
+      const width = Math.max(360, measuredWidth);
       const height = 160;
       const pad = {{ left: 34, right: 14, top: 14, bottom: 26 }};
       const plotWidth = width - pad.left - pad.right;
       const plotHeight = height - pad.top - pad.bottom;
       const bottom = pad.top + plotHeight;
       const maxY = getNiceTrendMax(Math.max(...points.map((point) => point.exhausted), 1));
-      const minMillis = points.length ? points[0].millis : Date.now();
-      const maxMillis = points.length ? points[points.length - 1].millis : minMillis;
-      const spanMillis = Math.max(1, maxMillis - minMillis);
-      const hasTimeSpan = points.length > 1 && maxMillis > minMillis;
       const chartPoints = points.map((point, index) => ({{
         ...point,
-        x: points.length === 1
+        x: points.length <= 1
           ? pad.left + plotWidth / 2
-          : hasTimeSpan
-            ? pad.left + ((point.millis - minMillis) / spanMillis) * plotWidth
-            : pad.left + (index / Math.max(points.length - 1, 1)) * plotWidth,
+          : pad.left + (index / (points.length - 1)) * plotWidth,
         y: bottom - (point.exhausted / maxY) * plotHeight
       }}));
 
@@ -2931,16 +2921,7 @@ def _render_index_script(
       const areaPath = chartPoints.length
         ? `${{linePath}} L ${{formatSvgNumber(chartPoints[chartPoints.length - 1].x)}} ${{bottom}} L ${{formatSvgNumber(chartPoints[0].x)}} ${{bottom}} Z`
         : "";
-      const pointHtml = chartPoints.map((point, index) => {{
-        const isLast = index === chartPoints.length - 1;
-        const isDailyMark = index % 24 === 0;
-        if (!isLast && !isDailyMark && chartPoints.length > 48) {{
-          return "";
-        }}
-        const radius = isLast ? 3.5 : 2.2;
-        return `<circle class="trend-point" cx="${{formatSvgNumber(point.x)}}" cy="${{formatSvgNumber(point.y)}}" r="${{radius}}"><title>${{escapeHtml(`${{formatCompactDateTimeText(point.capturedAt)}} · exhausted ${{point.exhausted}}`)}}</title></circle>`;
-      }}).join("");
-
+      svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
       svg.innerHTML = `
         <title id="exhausted-trend-title">exhausted 数量趋势</title>
         <defs>
@@ -2953,7 +2934,6 @@ def _render_index_script(
         ${{gridHtml}}
         ${{areaPath ? `<path class="trend-area" d="${{areaPath}}"></path>` : ""}}
         ${{linePath ? `<path class="trend-line" d="${{linePath}}"></path>` : ""}}
-        ${{pointHtml}}
         ${{xLabelHtml}}
       `;
     }}
