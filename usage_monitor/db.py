@@ -599,16 +599,6 @@ class UsageDatabase:
         start_bucket_at = end_bucket_at - timedelta(hours=safe_hours - 1)
 
         with self._connect() as conn:
-            previous_row = conn.execute(
-                f"""
-                SELECT captured_at_utc, exhausted
-                FROM {SUMMARY_HISTORY_TABLE_NAME}
-                WHERE captured_at_utc < ?
-                ORDER BY captured_at_utc DESC, id DESC
-                LIMIT 1
-                """,
-                (format_utc(start_bucket_at),),
-            ).fetchone()
             rows = conn.execute(
                 f"""
                 SELECT captured_at_utc, exhausted
@@ -619,38 +609,22 @@ class UsageDatabase:
                 (format_utc(start_bucket_at), format_utc(actual_end_at)),
             ).fetchall()
 
-        events: list[tuple[Any, int]] = []
-        if previous_row is not None:
-            previous_at = parse_utc(str(previous_row["captured_at_utc"] or ""))
-            if previous_at is not None:
-                events.append((previous_at, int(previous_row["exhausted"] or 0)))
+        bucket_values: dict[Any, int] = {}
         for row in rows:
             captured_at = parse_utc(str(row["captured_at_utc"] or ""))
-            if captured_at is not None:
-                events.append((captured_at, int(row["exhausted"] or 0)))
-
-        if events:
-            current_value = int(events[0][1])
-        else:
-            current_value = 0
+            if captured_at is None:
+                continue
+            bucket_at = captured_at.replace(minute=0, second=0, microsecond=0)
+            # 同一小时有多次采样时，使用该小时内最后一次记录；没有采样的小时保持 0。
+            bucket_values[bucket_at] = max(0, int(row["exhausted"] or 0))
 
         points: list[dict[str, Any]] = []
-        event_index = 0
         for offset in range(safe_hours):
             bucket_at = start_bucket_at + timedelta(hours=offset)
-            bucket_limit = bucket_at + timedelta(hours=1)
-            if offset == safe_hours - 1:
-                while event_index < len(events) and events[event_index][0] <= actual_end_at:
-                    current_value = int(events[event_index][1])
-                    event_index += 1
-            else:
-                while event_index < len(events) and events[event_index][0] < bucket_limit:
-                    current_value = int(events[event_index][1])
-                    event_index += 1
             points.append(
                 {
                     "captured_at_utc": format_utc(bucket_at),
-                    "exhausted": current_value,
+                    "exhausted": bucket_values.get(bucket_at, 0),
                 }
             )
         return points

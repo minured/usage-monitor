@@ -712,7 +712,7 @@ class UsageMonitorTestCase(unittest.TestCase):
                 ("2026-03-18T02:20:00Z",),
             )
         second_history = database.fetch_exhausted_history(hours=4, now_utc="2026-03-18T03:45:00Z")
-        self.assertEqual([point["exhausted"] for point in second_history], [0, 0, 1, 1])
+        self.assertEqual([point["exhausted"] for point in second_history], [0, 0, 1, 0])
 
         database.upsert_account(
             self._account_payload(
@@ -729,7 +729,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         payload = build_dashboard_payload(self.settings, "all", database)
         overview_payload = build_dashboard_overview_payload(self.settings, "all", database)
         self.assertEqual(len(payload["exhausted_history"]), 168)
-        self.assertEqual(payload["exhausted_history"][-1]["exhausted"], 1)
+        self.assertEqual(payload["exhausted_history"][-1]["exhausted"], 0)
         self.assertEqual(overview_payload["exhausted_history"], payload["exhausted_history"])
 
     def test_dashboard_overview_payload_omits_items(self) -> None:

@@ -955,7 +955,7 @@ def _render_index_styles() -> str:
       min-height: 154px;
       overflow: visible;
       border-radius: var(--radius-sm);
-      background: #fff;
+      background: transparent;
     }
     .trend-chart {
       display: block;
