@@ -963,13 +963,37 @@ def _render_index_styles() -> str:
       font-size: 10px;
       font-weight: 620;
     }
-    .trend-area { fill: url(#exhaustedTrendFill); }
     .trend-line {
       fill: none;
       stroke: var(--filter-exhausted);
       stroke-width: 2.4;
       stroke-linecap: round;
       stroke-linejoin: round;
+    }
+    .trend-hover-line {
+      stroke: #78716c;
+      stroke-width: 1;
+      stroke-dasharray: 3 3;
+      opacity: 0.74;
+    }
+    .trend-hover-dot {
+      fill: #fff;
+      stroke: var(--filter-exhausted);
+      stroke-width: 2;
+    }
+    .trend-tooltip-box {
+      fill: #292524;
+      opacity: 0.94;
+    }
+    .trend-tooltip-text {
+      fill: #fff;
+      font-size: 11px;
+      font-weight: 680;
+      font-variant-numeric: tabular-nums;
+    }
+    .trend-hit-layer {
+      fill: transparent;
+      cursor: crosshair;
     }
     .trend-empty {
       position: absolute;
@@ -2918,24 +2942,77 @@ def _render_index_script(
       }}).join("");
 
       const linePath = buildSmoothTrendPath(chartPoints);
-      const areaPath = chartPoints.length
-        ? `${{linePath}} L ${{formatSvgNumber(chartPoints[chartPoints.length - 1].x)}} ${{bottom}} L ${{formatSvgNumber(chartPoints[0].x)}} ${{bottom}} Z`
-        : "";
       svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
       svg.innerHTML = `
         <title id="exhausted-trend-title">exhausted 数量趋势</title>
-        <defs>
-          <linearGradient id="exhaustedTrendFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="#f97316" stop-opacity="0.18"></stop>
-            <stop offset="100%" stop-color="#f97316" stop-opacity="0.02"></stop>
-          </linearGradient>
-        </defs>
-        <rect x="0" y="0" width="${{width}}" height="${{height}}" fill="#fff"></rect>
         ${{gridHtml}}
-        ${{areaPath ? `<path class="trend-area" d="${{areaPath}}"></path>` : ""}}
         ${{linePath ? `<path class="trend-line" d="${{linePath}}"></path>` : ""}}
         ${{xLabelHtml}}
+        <g id="exhausted-trend-hover" hidden></g>
+        <rect id="exhausted-trend-hit-layer" class="trend-hit-layer" x="${{pad.left}}" y="${{pad.top}}" width="${{plotWidth}}" height="${{plotHeight}}"></rect>
       `;
+      bindExhaustedTrendHover(svg, chartPoints, {{ width, height, pad, bottom }});
+    }}
+
+    function renderTrendHover(svg, point, geometry) {{
+      const hover = svg.querySelector("#exhausted-trend-hover");
+      const current = document.getElementById("exhausted-trend-current");
+      const time = document.getElementById("exhausted-trend-time");
+      if (!hover || !point) {{
+        return;
+      }}
+      const tooltipWidth = 136;
+      const tooltipHeight = 38;
+      const tooltipGap = 8;
+      const tooltipX = Math.min(
+        Math.max(point.x + tooltipGap, 6),
+        geometry.width - tooltipWidth - 6
+      );
+      const tooltipY = Math.max(6, point.y - tooltipHeight - 10);
+      hover.hidden = false;
+      hover.innerHTML = `
+        <line class="trend-hover-line" x1="${{formatSvgNumber(point.x)}}" y1="${{geometry.pad.top}}" x2="${{formatSvgNumber(point.x)}}" y2="${{geometry.bottom}}"></line>
+        <circle class="trend-hover-dot" cx="${{formatSvgNumber(point.x)}}" cy="${{formatSvgNumber(point.y)}}" r="3.4"></circle>
+        <rect class="trend-tooltip-box" x="${{formatSvgNumber(tooltipX)}}" y="${{formatSvgNumber(tooltipY)}}" width="${{tooltipWidth}}" height="${{tooltipHeight}}" rx="6"></rect>
+        <text class="trend-tooltip-text" x="${{formatSvgNumber(tooltipX + 8)}}" y="${{formatSvgNumber(tooltipY + 15)}}">${{escapeHtml(formatCompactDateTimeText(point.capturedAt))}}</text>
+        <text class="trend-tooltip-text" x="${{formatSvgNumber(tooltipX + 8)}}" y="${{formatSvgNumber(tooltipY + 30)}}">exhausted ${{point.exhausted}}</text>
+      `;
+      if (current) {{
+        current.textContent = String(point.exhausted);
+      }}
+      if (time) {{
+        time.textContent = formatCompactDateTimeText(point.capturedAt);
+      }}
+    }}
+
+    function bindExhaustedTrendHover(svg, chartPoints, geometry) {{
+      const hitLayer = svg.querySelector("#exhausted-trend-hit-layer");
+      const hover = svg.querySelector("#exhausted-trend-hover");
+      if (!hitLayer || !hover || !chartPoints.length) {{
+        return;
+      }}
+      hitLayer.addEventListener("pointermove", (event) => {{
+        const rect = svg.getBoundingClientRect();
+        const ratio = geometry.width / Math.max(rect.width, 1);
+        const x = (event.clientX - rect.left) * ratio;
+        const rawIndex = Math.round(((x - geometry.pad.left) / Math.max(geometry.width - geometry.pad.left - geometry.pad.right, 1)) * (chartPoints.length - 1));
+        const index = Math.max(0, Math.min(chartPoints.length - 1, rawIndex));
+        renderTrendHover(svg, chartPoints[index], geometry);
+      }});
+      hitLayer.addEventListener("pointerleave", () => {{
+        hover.hidden = true;
+        const current = document.getElementById("exhausted-trend-current");
+        const time = document.getElementById("exhausted-trend-time");
+        const latest = chartPoints[chartPoints.length - 1];
+        if (latest) {{
+          if (current) {{
+            current.textContent = String(latest.exhausted);
+          }}
+          if (time) {{
+            time.textContent = formatCompactDateTimeText(latest.capturedAt);
+          }}
+        }}
+      }});
     }}
 
     function updateExhaustedHistory(history) {{
