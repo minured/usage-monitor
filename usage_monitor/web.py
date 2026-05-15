@@ -973,10 +973,9 @@ def _render_index_styles() -> str:
       stroke-linejoin: round;
     }
     .trend-hover-line {
-      stroke: #78716c;
+      stroke: #9ca3af;
       stroke-width: 1;
-      stroke-dasharray: 3 3;
-      opacity: 0.74;
+      opacity: 1;
     }
     .trend-hover-dot {
       fill: #fff;
@@ -2986,10 +2985,10 @@ def _render_index_script(
       svg.innerHTML = `
         <title id="exhausted-trend-title">exhausted 数量趋势</title>
         ${{gridHtml}}
+        <rect id="exhausted-trend-hit-layer" class="trend-hit-layer" x="0" y="0" width="${{width}}" height="${{height}}"></rect>
         ${{linePath ? `<path class="trend-line" d="${{linePath}}"></path>` : ""}}
         ${{xLabelHtml}}
         <g id="exhausted-trend-hover" hidden></g>
-        <rect id="exhausted-trend-hit-layer" class="trend-hit-layer" x="0" y="0" width="${{width}}" height="${{height}}"></rect>
       `;
       clearExhaustedTrendHover({{ restoreLatest: false }});
       bindExhaustedTrendHover(svg, chartPoints, {{ width, height, pad, bottom }});
@@ -3017,7 +3016,7 @@ def _render_index_script(
       const hover = svg ? svg.querySelector("#exhausted-trend-hover") : null;
       const tooltip = document.getElementById("exhausted-trend-tooltip");
       if (hover) {{
-        hover.hidden = true;
+        hover.setAttribute("hidden", "");
         hover.innerHTML = "";
       }}
       if (tooltip) {{
@@ -3073,7 +3072,7 @@ def _render_index_script(
       if (!hover || !point) {{
         return;
       }}
-      hover.hidden = false;
+      hover.removeAttribute("hidden");
       hover.innerHTML = `
         <line class="trend-hover-line" x1="${{formatSvgNumber(point.x)}}" y1="${{geometry.pad.top}}" x2="${{formatSvgNumber(point.x)}}" y2="${{geometry.bottom}}"></line>
         <circle class="trend-hover-dot" cx="${{formatSvgNumber(point.x)}}" cy="${{formatSvgNumber(point.y)}}" r="3.2"></circle>
