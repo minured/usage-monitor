@@ -7,7 +7,7 @@ import json
 import logging
 import threading
 from socketserver import ThreadingMixIn
-from time import monotonic, sleep
+from time import monotonic, sleep, time
 from typing import Any, Callable
 from urllib.parse import parse_qs
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
@@ -2931,9 +2931,15 @@ def _render_index_script(
       const areaPath = chartPoints.length
         ? `${{linePath}} L ${{formatSvgNumber(chartPoints[chartPoints.length - 1].x)}} ${{bottom}} L ${{formatSvgNumber(chartPoints[0].x)}} ${{bottom}} Z`
         : "";
-      const pointHtml = chartPoints.map((point) => (
-        `<circle class="trend-point" cx="${{formatSvgNumber(point.x)}}" cy="${{formatSvgNumber(point.y)}}" r="3"><title>${{escapeHtml(`${{formatCompactDateTimeText(point.capturedAt)}} · exhausted ${{point.exhausted}}`)}}</title></circle>`
-      )).join("");
+      const pointHtml = chartPoints.map((point, index) => {{
+        const isLast = index === chartPoints.length - 1;
+        const isDailyMark = index % 24 === 0;
+        if (!isLast && !isDailyMark && chartPoints.length > 48) {{
+          return "";
+        }}
+        const radius = isLast ? 3.5 : 2.2;
+        return `<circle class="trend-point" cx="${{formatSvgNumber(point.x)}}" cy="${{formatSvgNumber(point.y)}}" r="${{radius}}"><title>${{escapeHtml(`${{formatCompactDateTimeText(point.capturedAt)}} · exhausted ${{point.exhausted}}`)}}</title></circle>`;
+      }}).join("");
 
       svg.innerHTML = `
         <title id="exhausted-trend-title">exhausted 数量趋势</title>
@@ -3493,9 +3499,17 @@ def create_app(settings: Settings):
             known_accounts_revision = 0
         return current_filter, skip_initial_dashboard, known_accounts_revision
 
+    def _current_history_cache_hour() -> int:
+        return int(time() // 3600)
+
     def _build_dashboard_json(current_filter: str) -> bytes:
         revisions = database.fetch_change_state()
-        cache_key = ("dashboard", current_filter, int(revisions["accounts_revision"]))
+        cache_key = (
+            "dashboard",
+            current_filter,
+            int(revisions["accounts_revision"]),
+            _current_history_cache_hour(),
+        )
         return json_cache.get_or_build(
             cache_key,
             lambda: _encode_json_body(build_dashboard_payload(settings, current_filter, database)),
@@ -3515,6 +3529,7 @@ def create_app(settings: Settings):
             "index",
             int(revisions["accounts_revision"]),
             int(revisions["runtime_revision"]),
+            _current_history_cache_hour(),
             1 if gzip_enabled else 0,
         )
 

@@ -668,10 +668,21 @@ class UsageMonitorTestCase(unittest.TestCase):
         source_missing_payload = build_dashboard_payload(self.settings, "source_missing")
         self.assertEqual([item["email"] for item in source_missing_payload["items"]], ["a4@example.com"])
 
-    def test_exhausted_history_records_changes_and_dashboard_returns_it(self) -> None:
+    def test_exhausted_history_records_hourly_sliding_window(self) -> None:
         database = UsageDatabase(self.settings.db_path)
         database.initialize()
-        self.assertEqual(database.fetch_exhausted_history(), [])
+        empty_history = database.fetch_exhausted_history(hours=4, now_utc="2026-03-18T03:45:00Z")
+        self.assertEqual(len(empty_history), 4)
+        self.assertEqual(
+            [point["captured_at_utc"] for point in empty_history],
+            [
+                "2026-03-18T00:00:00Z",
+                "2026-03-18T01:00:00Z",
+                "2026-03-18T02:00:00Z",
+                "2026-03-18T03:00:00Z",
+            ],
+        )
+        self.assertEqual([point["exhausted"] for point in empty_history], [0, 0, 0, 0])
 
         database.upsert_account(
             self._account_payload(
@@ -680,8 +691,13 @@ class UsageMonitorTestCase(unittest.TestCase):
                 checked_at="2026-03-18T00:00:00Z",
             )
         )
-        first_history = database.fetch_exhausted_history()
-        self.assertEqual([point["exhausted"] for point in first_history], [0])
+        with sqlite3.connect(self.settings.db_path) as conn:
+            conn.execute(
+                "UPDATE summary_history SET captured_at_utc = ? WHERE id = (SELECT MAX(id) FROM summary_history)",
+                ("2026-03-18T00:10:00Z",),
+            )
+        first_history = database.fetch_exhausted_history(hours=4, now_utc="2026-03-18T03:45:00Z")
+        self.assertEqual([point["exhausted"] for point in first_history], [0, 0, 0, 0])
 
         database.upsert_account(
             self._account_payload(
@@ -690,8 +706,13 @@ class UsageMonitorTestCase(unittest.TestCase):
                 checked_at="2026-03-18T00:05:00Z",
             )
         )
-        second_history = database.fetch_exhausted_history()
-        self.assertEqual([point["exhausted"] for point in second_history], [0, 1])
+        with sqlite3.connect(self.settings.db_path) as conn:
+            conn.execute(
+                "UPDATE summary_history SET captured_at_utc = ? WHERE id = (SELECT MAX(id) FROM summary_history)",
+                ("2026-03-18T02:20:00Z",),
+            )
+        second_history = database.fetch_exhausted_history(hours=4, now_utc="2026-03-18T03:45:00Z")
+        self.assertEqual([point["exhausted"] for point in second_history], [0, 0, 1, 1])
 
         database.upsert_account(
             self._account_payload(
@@ -700,14 +721,15 @@ class UsageMonitorTestCase(unittest.TestCase):
                 checked_at="2026-03-18T00:10:00Z",
             )
         )
-        self.assertEqual(database.fetch_exhausted_history(), second_history)
+        self.assertEqual(
+            database.fetch_exhausted_history(hours=4, now_utc="2026-03-18T03:45:00Z"),
+            second_history,
+        )
 
         payload = build_dashboard_payload(self.settings, "all", database)
         overview_payload = build_dashboard_overview_payload(self.settings, "all", database)
-        self.assertEqual(
-            [point["exhausted"] for point in payload["exhausted_history"]],
-            [0, 1],
-        )
+        self.assertEqual(len(payload["exhausted_history"]), 168)
+        self.assertEqual(payload["exhausted_history"][-1]["exhausted"], 1)
         self.assertEqual(overview_payload["exhausted_history"], payload["exhausted_history"])
 
     def test_dashboard_overview_payload_omits_items(self) -> None:

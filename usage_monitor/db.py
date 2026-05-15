@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -24,14 +25,14 @@ from .models import (
     normalize_chatgpt_user_id,
     normalize_plan_type,
 )
-from .timeutil import utc_now_iso
+from .timeutil import format_utc, parse_utc, utc_now, utc_now_iso
 
 
 TABLE_NAME = "accounts_latest"
 RUNTIME_TABLE_NAME = "collector_runtime"
 SUMMARY_HISTORY_TABLE_NAME = "summary_history"
 RUNTIME_KEY = "collector"
-SUMMARY_HISTORY_LIMIT = 96
+SUMMARY_HISTORY_HOURS = 168
 SUMMARY_KEYS = (
     "total",
     "active",
@@ -580,29 +581,79 @@ class UsageDatabase:
             return None
         return {key: row[key] for key in row.keys()}
 
-    def fetch_exhausted_history(self, limit: int = SUMMARY_HISTORY_LIMIT) -> list[dict[str, Any]]:
+    def fetch_exhausted_history(
+        self,
+        hours: int = SUMMARY_HISTORY_HOURS,
+        *,
+        now_utc: str | None = None,
+    ) -> list[dict[str, Any]]:
         try:
-            safe_limit = int(limit)
+            safe_hours = int(hours)
         except (TypeError, ValueError):
-            safe_limit = SUMMARY_HISTORY_LIMIT
-        safe_limit = max(1, min(safe_limit, 1000))
+            safe_hours = SUMMARY_HISTORY_HOURS
+        safe_hours = max(1, min(safe_hours, 1000))
+
+        parsed_now = parse_utc(now_utc) if now_utc else None
+        actual_end_at = parsed_now or utc_now()
+        end_bucket_at = actual_end_at.replace(minute=0, second=0, microsecond=0)
+        start_bucket_at = end_bucket_at - timedelta(hours=safe_hours - 1)
+
         with self._connect() as conn:
+            previous_row = conn.execute(
+                f"""
+                SELECT captured_at_utc, exhausted
+                FROM {SUMMARY_HISTORY_TABLE_NAME}
+                WHERE captured_at_utc < ?
+                ORDER BY captured_at_utc DESC, id DESC
+                LIMIT 1
+                """,
+                (format_utc(start_bucket_at),),
+            ).fetchone()
             rows = conn.execute(
                 f"""
                 SELECT captured_at_utc, exhausted
                 FROM {SUMMARY_HISTORY_TABLE_NAME}
-                ORDER BY id DESC
-                LIMIT ?
+                WHERE captured_at_utc >= ? AND captured_at_utc <= ?
+                ORDER BY captured_at_utc ASC, id ASC
                 """,
-                (safe_limit,),
+                (format_utc(start_bucket_at), format_utc(actual_end_at)),
             ).fetchall()
-        return [
-            {
-                "captured_at_utc": str(row["captured_at_utc"] or ""),
-                "exhausted": int(row["exhausted"] or 0),
-            }
-            for row in reversed(rows)
-        ]
+
+        events: list[tuple[Any, int]] = []
+        if previous_row is not None:
+            previous_at = parse_utc(str(previous_row["captured_at_utc"] or ""))
+            if previous_at is not None:
+                events.append((previous_at, int(previous_row["exhausted"] or 0)))
+        for row in rows:
+            captured_at = parse_utc(str(row["captured_at_utc"] or ""))
+            if captured_at is not None:
+                events.append((captured_at, int(row["exhausted"] or 0)))
+
+        if events:
+            current_value = int(events[0][1])
+        else:
+            current_value = 0
+
+        points: list[dict[str, Any]] = []
+        event_index = 0
+        for offset in range(safe_hours):
+            bucket_at = start_bucket_at + timedelta(hours=offset)
+            bucket_limit = bucket_at + timedelta(hours=1)
+            if offset == safe_hours - 1:
+                while event_index < len(events) and events[event_index][0] <= actual_end_at:
+                    current_value = int(events[event_index][1])
+                    event_index += 1
+            else:
+                while event_index < len(events) and events[event_index][0] < bucket_limit:
+                    current_value = int(events[event_index][1])
+                    event_index += 1
+            points.append(
+                {
+                    "captured_at_utc": format_utc(bucket_at),
+                    "exhausted": current_value,
+                }
+            )
+        return points
 
     def fetch_dashboard(self, filter_name: str = "all") -> tuple[dict[str, int], list[sqlite3.Row]]:
         current_filter = filter_name if filter_name in FILTERS else "all"
