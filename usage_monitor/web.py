@@ -2925,24 +2925,13 @@ def _render_index_script(
       return text.replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
     }}
 
-    function buildSmoothTrendPath(points) {{
+    function buildLinearTrendPath(points) {{
       if (!points.length) {{
         return "";
       }}
-      if (points.length === 1) {{
-        return `M ${{formatSvgNumber(points[0].x)}} ${{formatSvgNumber(points[0].y)}}`;
-      }}
       let path = `M ${{formatSvgNumber(points[0].x)}} ${{formatSvgNumber(points[0].y)}}`;
-      for (let index = 0; index < points.length - 1; index += 1) {{
-        const p0 = points[index - 1] || points[index];
-        const p1 = points[index];
-        const p2 = points[index + 1];
-        const p3 = points[index + 2] || p2;
-        const cp1x = p1.x + (p2.x - p0.x) / 6;
-        const cp1y = p1.y + (p2.y - p0.y) / 6;
-        const cp2x = p2.x - (p3.x - p1.x) / 6;
-        const cp2y = p2.y - (p3.y - p1.y) / 6;
-        path += ` C ${{formatSvgNumber(cp1x)}} ${{formatSvgNumber(cp1y)}}, ${{formatSvgNumber(cp2x)}} ${{formatSvgNumber(cp2y)}}, ${{formatSvgNumber(p2.x)}} ${{formatSvgNumber(p2.y)}}`;
+      for (let index = 1; index < points.length; index += 1) {{
+        path += ` L ${{formatSvgNumber(points[index].x)}} ${{formatSvgNumber(points[index].y)}}`;
       }}
       return path;
     }}
@@ -2999,7 +2988,7 @@ def _render_index_script(
         return `<text class="trend-axis-label" x="${{formatSvgNumber(point.x)}}" y="${{height - 7}}" text-anchor="${{anchor}}">${{escapeHtml(formatCompactDateTimeText(point.capturedAt))}}</text>`;
       }}).join("");
 
-      const linePath = buildSmoothTrendPath(chartPoints);
+      const linePath = buildLinearTrendPath(chartPoints);
       svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
       svg.setAttribute("preserveAspectRatio", "none");
       svg.innerHTML = `
