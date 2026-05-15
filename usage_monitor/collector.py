@@ -26,7 +26,7 @@ from .models import (
     TokenRecord,
 )
 from .openai_api import HTTPStatusError, InvalidResponseError, OpenAIUsageClient, TransportError
-from .timeutil import iso_after_seconds, iso_from_unix, utc_now_iso
+from .timeutil import iso_after_seconds, iso_from_unix, parse_utc, utc_now, utc_now_iso
 from .tokens import move_token_to_auth_invalid, scan_tokens_dir, write_refreshed_tokens
 
 
@@ -132,18 +132,18 @@ class CollectorService:
 
     def run_forever(self) -> None:
         while True:
+            self._ensure_scheduled_sleep()
+            logger.info(
+                "等待调度时间到达后开始下一轮（sleeping 阶段支持手动触发提前开始）",
+            )
+            if self._wait_for_next_round():
+                logger.info("已消费手动触发请求，立即开始下一轮采集")
             try:
                 self.run_once()
                 self._mark_sleeping()
             except Exception as exc:  # noqa: BLE001
                 logger.exception("本轮采集异常退出")
                 self._safe_mark_error(exc)
-            logger.info(
-                "等待最多 %.1f 秒后开始下一轮（sleeping 阶段支持手动触发提前开始）",
-                self.settings.round_interval_seconds,
-            )
-            if self._wait_for_next_round():
-                logger.info("已消费手动触发请求，立即开始下一轮采集")
 
     def run_once(self) -> None:
         self.database.initialize()
@@ -682,8 +682,22 @@ class CollectorService:
             manual_stop_requested_at=None,
         )
 
+    def _ensure_scheduled_sleep(self) -> None:
+        self.database.initialize()
+        runtime = self.database.ensure_runtime_row()
+        next_round_at = parse_utc(str(runtime.get("next_round_at_utc") or ""))
+        # 进程重启或重新部署时不能立即采集；没有调度时间才创建下一次调度。
+        self._update_runtime(
+            phase=COLLECTOR_PHASE_SLEEPING,
+            next_round_at_utc=str(runtime.get("next_round_at_utc") or "") if next_round_at else iso_after_seconds(self.settings.round_interval_seconds),
+            current_index=0,
+            current_account_id=None,
+            current_account_email=None,
+            current_source_file=None,
+            manual_stop_requested_at=None,
+        )
+
     def _wait_for_next_round(self) -> bool:
-        deadline = time.monotonic() + self.settings.round_interval_seconds
         poll_interval = max(float(self.settings.manual_trigger_poll_seconds), 0.2)
 
         while True:
@@ -692,7 +706,13 @@ class CollectorService:
                 logger.info("检测到手动触发请求：%s", requested_at)
                 return True
 
-            remaining_seconds = deadline - time.monotonic()
+            runtime = self.database.ensure_runtime_row()
+            next_round_at = parse_utc(str(runtime.get("next_round_at_utc") or ""))
+            if next_round_at is None:
+                self._ensure_scheduled_sleep()
+                continue
+
+            remaining_seconds = (next_round_at - utc_now()).total_seconds()
             if remaining_seconds <= 0:
                 return False
             self.sleeper(min(poll_interval, remaining_seconds))

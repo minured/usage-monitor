@@ -1617,6 +1617,32 @@ class UsageMonitorTestCase(unittest.TestCase):
         assert runtime_row is not None
         self.assertFalse(runtime_row["manual_trigger_requested_at"])
 
+    def test_run_forever_waits_for_schedule_before_first_scan(self) -> None:
+        self._write_token(file_name="token0001_demo.json", account_id="acct-1", email="one@example.com")
+        fetch_calls: list[str] = []
+
+        def fetch_action(record):
+            fetch_calls.append(record.dimension_key)
+            return make_usage_payload(used_percent=12)
+
+        def interrupting_sleeper(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        service = CollectorService(
+            settings=self.settings,
+            api_client=ScriptedClient(fetch_actions={"acct-1": [fetch_action]}),
+            sleeper=interrupting_sleeper,
+        )
+
+        with self.assertRaises(KeyboardInterrupt):
+            service.run_forever()
+
+        self.assertEqual(fetch_calls, [])
+        runtime_row = UsageDatabase(self.settings.db_path).fetch_runtime()
+        assert runtime_row is not None
+        self.assertEqual(runtime_row["phase"], COLLECTOR_PHASE_SLEEPING)
+        self.assertTrue(runtime_row["next_round_at_utc"])
+
     def test_run_once_stops_after_current_record_when_stop_requested_during_processing(self) -> None:
         self._write_token(file_name="token0002_demo.json", account_id="acct-2", email="two@example.com")
         self._write_token(file_name="token0001_demo.json", account_id="acct-1", email="one@example.com")
