@@ -2853,7 +2853,7 @@ def _render_index_script(
       }}
       const rate = Math.max(0, Math.min(100, (available / active) * 100));
       valueElement.textContent = `${{rate.toFixed(1)}}%`;
-      rateElement.className = `availability-rate ${{rate >= 80 ? "is-high" : rate >= 50 ? "is-medium" : "is-low"}}`;
+      rateElement.className = `availability-rate ${{rate >= 60 ? "is-high" : rate >= 20 ? "is-medium" : "is-low"}}`;
       rateElement.title = `available / active = ${{available}} / ${{active}}`;
     }}
 
