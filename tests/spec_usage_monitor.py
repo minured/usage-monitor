@@ -768,6 +768,27 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(status.reset_at_utc, "2026-05-20T05:19:21Z")
         self.assertIn("usage limit", status.cpa_status_message.lower())
 
+    def test_cpa_auth_file_status_parser_uses_resets_at_from_status_message(self) -> None:
+        status = parse_auth_file_status(
+            {
+                "name": "codex-reset@example.com-free.json",
+                "email": "reset@example.com",
+                "status": "error",
+                "status_message": json.dumps(
+                    {
+                        "error": {
+                            "type": "usage_limit_reached",
+                            "message": "The usage limit has been reached",
+                            "resets_at": 1893456000,
+                        }
+                    }
+                ),
+            }
+        )
+
+        self.assertEqual(status.quota_status, QUOTA_EXHAUSTED)
+        self.assertEqual(status.reset_at_utc, "2030-01-01T00:00:00Z")
+
     def test_cpa_status_overlay_updates_dashboard_summary(self) -> None:
         database = UsageDatabase(self.settings.db_path)
         database.initialize()
@@ -871,6 +892,89 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(payload["summary"]["exhausted"], 1)
         self.assertEqual([item["email"] for item in payload["items"]], ["a1@example.com"])
         self.assertEqual(payload["items"][0]["quota_status"], QUOTA_EXHAUSTED)
+        self.assertEqual(payload["items"][0]["reset_at_utc"], "9999-12-31T23:59:59Z")
+
+    def test_cpa_origin_exhausted_survives_later_active_before_reset(self) -> None:
+        database = UsageDatabase(self.settings.db_path)
+        database.initialize()
+        database.upsert_account(
+            self._account_payload(
+                "a1",
+                QUOTA_AVAILABLE,
+                checked_at="2026-03-18T00:00:00Z",
+            )
+        )
+
+        database.sync_cpa_statuses(
+            [
+                {
+                    "source_file_name": "a1.json",
+                    "email": "a1@example.com",
+                    "quota_status": QUOTA_EXHAUSTED,
+                    "reset_at_utc": "9999-12-31T23:59:59Z",
+                    "cpa_status": "error",
+                    "cpa_status_message": "The usage limit has been reached",
+                }
+            ],
+            cpa_stale_seconds=120,
+        )
+        database.sync_cpa_statuses(
+            [
+                {
+                    "source_file_name": "a1.json",
+                    "email": "a1@example.com",
+                    "quota_status": QUOTA_AVAILABLE,
+                    "reset_at_utc": None,
+                    "cpa_status": "active",
+                    "cpa_status_message": "",
+                }
+            ],
+            cpa_stale_seconds=120,
+        )
+
+        cpa_settings = replace(self.settings, cpa_status_enabled=True, cpa_status_stale_seconds=120)
+        payload = build_dashboard_payload(cpa_settings, "exhausted", database)
+
+        self.assertEqual(payload["summary"]["available"], 0)
+        self.assertEqual(payload["summary"]["exhausted"], 1)
+        self.assertEqual(payload["items"][0]["quota_status"], QUOTA_EXHAUSTED)
+        self.assertEqual(payload["items"][0]["reset_at_utc"], "9999-12-31T23:59:59Z")
+
+    def test_stale_cpa_origin_exhausted_stays_exhausted_before_reset(self) -> None:
+        database = UsageDatabase(self.settings.db_path)
+        database.initialize()
+        database.upsert_account(
+            self._account_payload(
+                "a1",
+                QUOTA_AVAILABLE,
+                checked_at="2026-03-18T00:00:00Z",
+            )
+        )
+        database.sync_cpa_statuses(
+            [
+                {
+                    "source_file_name": "a1.json",
+                    "email": "a1@example.com",
+                    "quota_status": QUOTA_EXHAUSTED,
+                    "reset_at_utc": "9999-12-31T23:59:59Z",
+                    "cpa_status": "error",
+                    "cpa_status_message": "The usage limit has been reached",
+                }
+            ],
+            cpa_stale_seconds=120,
+        )
+        with sqlite3.connect(self.settings.db_path) as conn:
+            conn.execute(
+                "UPDATE accounts_latest SET cpa_synced_at_utc = ?",
+                ("2000-01-01T00:00:00Z",),
+            )
+            conn.commit()
+
+        cpa_settings = replace(self.settings, cpa_status_enabled=True, cpa_status_stale_seconds=1)
+        payload = build_dashboard_payload(cpa_settings, "exhausted", database)
+
+        self.assertEqual(payload["summary"]["available"], 0)
+        self.assertEqual(payload["summary"]["exhausted"], 1)
         self.assertEqual(payload["items"][0]["reset_at_utc"], "9999-12-31T23:59:59Z")
 
     def test_dashboard_overview_payload_omits_items(self) -> None:
@@ -1814,6 +1918,33 @@ class UsageMonitorTestCase(unittest.TestCase):
 
         self.assertEqual(fetch_calls, [])
         self.assertEqual(cpa_client.calls, 1)
+
+    def test_run_once_syncs_cpa_status_during_scan_when_due(self) -> None:
+        self._write_token(file_name="token0001_demo.json", account_id="acct-1", email="one@example.com")
+        self._write_token(file_name="token0002_demo.json", account_id="acct-2", email="two@example.com")
+        cpa_client = FakeCPAStatusClient([])
+        service = CollectorService(
+            settings=replace(
+                self.settings,
+                cpa_status_enabled=True,
+                cpa_status_url="http://127.0.0.1:8317/v0/management/auth-files",
+                cpa_management_key="test-key",
+                cpa_status_sync_seconds=5,
+            ),
+            api_client=ScriptedClient(
+                fetch_actions={
+                    "acct-1": [make_usage_payload(used_percent=12)],
+                    "acct-2": [make_usage_payload(used_percent=18)],
+                }
+            ),
+            cpa_status_client=cpa_client,
+            sleeper=lambda *_args, **_kwargs: None,
+        )
+        service._last_cpa_status_sync_monotonic = 0.0
+
+        service.run_once()
+
+        self.assertGreaterEqual(cpa_client.calls, 2)
 
     def test_run_once_stops_after_current_record_when_stop_requested_during_processing(self) -> None:
         self._write_token(file_name="token0002_demo.json", account_id="acct-2", email="two@example.com")

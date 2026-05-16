@@ -68,7 +68,7 @@ CPA 实时状态补充：
 - 可选启用 CPA 只读同步后，collector 会定期 `GET /v0/management/auth-files`
 - 该同步只读取 CPA 运行时已知状态，不调用 OpenAI，也不写 CPA 配置、auth 文件或 CPA 数据库
 - CPA 返回 `usage_limit_reached` 时，页面会优先按 `exhausted` 展示
-- CPA 返回 `active` 时，页面通常按 `available` 展示；但官方扫描已判定 `exhausted` 且 `reset_at_utc` 未到时，会继续保持 `exhausted`，避免 CPA 瞬态刷新造成假恢复
+- CPA 返回 `active` 时，页面通常按 `available` 展示；但官方扫描或 CPA 已判定 `exhausted` 且重置时间未到时，会继续保持 `exhausted`，避免 CPA 瞬态刷新造成假恢复
 - CPA 状态过期后，页面自动退回 6 小时官方 usage 扫描结果
 - 官方扫描得到的 `used_percent` / `reset_at_utc` 仍会保留，CPA 状态只作为 Monitor 自己数据库中的 overlay 字段
 

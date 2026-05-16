@@ -437,7 +437,7 @@ class UsageDatabase:
             "AND cpa_synced_at_utc >= ? "
             "AND cpa_quota_status IN (?, ?, ?)"
         )
-        # CPA 的 active 是运行时瞬态状态；官方扫描已耗尽且 reset 未到时，
+        # CPA 的 active 是运行时瞬态状态；官方扫描或 CPA 已耗尽且 reset 未到时，
         # 不允许它把账号反向冲成 available，避免刷新 auth 文件时出现假恢复。
         sticky_exhausted_expr = (
             "quota_status = ? "
@@ -445,17 +445,26 @@ class UsageDatabase:
             "AND reset_at_utc != '' "
             "AND reset_at_utc > ?"
         )
+        cpa_sticky_exhausted_expr = (
+            "cpa_quota_status = ? "
+            "AND cpa_reset_at_utc IS NOT NULL "
+            "AND cpa_reset_at_utc != '' "
+            "AND cpa_reset_at_utc > ?"
+        )
         freshness_params: tuple[Any, ...] = (
             LIFECYCLE_ACTIVE,
             cutoff_utc,
             *CPA_QUOTA_VALUES,
         )
         sticky_exhausted_params: tuple[Any, ...] = (QUOTA_EXHAUSTED, now_utc)
+        cpa_sticky_exhausted_params: tuple[Any, ...] = (QUOTA_EXHAUSTED, now_utc)
         exhausted_literal = QUOTA_EXHAUSTED.replace("'", "''")
         sql = f"""
             SELECT
                 base.*,
                 CASE
+                    WHEN base.cpa_exhausted_still_waiting
+                    THEN '{exhausted_literal}'
                     WHEN base.cpa_status_is_fresh
                         AND base.cpa_quota_status = '{exhausted_literal}'
                     THEN base.cpa_quota_status
@@ -465,6 +474,8 @@ class UsageDatabase:
                     ELSE base.quota_status
                 END AS effective_quota_status,
                 CASE
+                    WHEN base.cpa_exhausted_still_waiting
+                    THEN base.cpa_reset_at_utc
                     WHEN base.cpa_status_is_fresh
                         AND base.cpa_quota_status = '{exhausted_literal}'
                         AND base.cpa_reset_at_utc IS NOT NULL
@@ -482,11 +493,12 @@ class UsageDatabase:
                 SELECT
                     *,
                     ({freshness_expr}) AS cpa_status_is_fresh,
-                    ({sticky_exhausted_expr}) AS official_exhausted_still_waiting
+                    ({sticky_exhausted_expr}) AS official_exhausted_still_waiting,
+                    ({cpa_sticky_exhausted_expr}) AS cpa_exhausted_still_waiting
                 FROM {TABLE_NAME}
             ) AS base
         """
-        return sql, freshness_params + sticky_exhausted_params
+        return sql, freshness_params + sticky_exhausted_params + cpa_sticky_exhausted_params
 
     def _fetch_summary_counts_in_transaction(
         self,
@@ -668,7 +680,13 @@ class UsageDatabase:
             if email:
                 by_email[email] = normalized
 
-        now = utc_now_iso()
+        now_dt = utc_now()
+        now = format_utc(now_dt)
+
+        def is_future_utc(value: Any) -> bool:
+            parsed = parse_utc(str(value or ""))
+            return parsed is not None and parsed > now_dt
+
         matched_rows = 0
         changed_rows = 0
         cleared_rows = 0
@@ -681,6 +699,8 @@ class UsageDatabase:
                     email,
                     source_file,
                     lifecycle_status,
+                    quota_status,
+                    reset_at_utc,
                     cpa_quota_status,
                     cpa_reset_at_utc,
                     cpa_synced_at_utc,
@@ -695,19 +715,48 @@ class UsageDatabase:
                 payload = None
                 if str(row["lifecycle_status"] or "") == LIFECYCLE_ACTIVE:
                     payload = by_file.get(source_file_name) or by_email.get(email)
+                existing_cpa_reset_at = row["cpa_reset_at_utc"]
+                cpa_exhausted_still_waiting = (
+                    str(row["cpa_quota_status"] or "") == QUOTA_EXHAUSTED
+                    and is_future_utc(existing_cpa_reset_at)
+                )
+                official_reset_fallback = row["reset_at_utc"] if is_future_utc(row["reset_at_utc"]) else None
+
                 if payload is not None:
                     matched_rows += 1
-                    next_values = (
-                        payload["quota_status"],
-                        payload["reset_at_utc"],
-                        now,
-                        payload["cpa_status"],
-                        payload["cpa_status_message"],
-                    )
+                    incoming_quota_status = str(payload["quota_status"] or QUOTA_UNKNOWN)
+                    incoming_reset_at = payload["reset_at_utc"]
+                    if incoming_quota_status == QUOTA_EXHAUSTED and not incoming_reset_at:
+                        incoming_reset_at = existing_cpa_reset_at if is_future_utc(existing_cpa_reset_at) else official_reset_fallback
+                    if cpa_exhausted_still_waiting and incoming_quota_status != QUOTA_EXHAUSTED:
+                        next_values = (
+                            QUOTA_EXHAUSTED,
+                            existing_cpa_reset_at,
+                            now,
+                            row["cpa_status"] or "error",
+                            row["cpa_status_message"] or "The usage limit has been reached",
+                        )
+                    else:
+                        next_values = (
+                            incoming_quota_status,
+                            incoming_reset_at,
+                            now,
+                            payload["cpa_status"],
+                            payload["cpa_status_message"],
+                        )
                 else:
-                    next_values = (None, None, None, None, None)
-                    if row["cpa_synced_at_utc"] is not None:
-                        cleared_rows += 1
+                    if cpa_exhausted_still_waiting:
+                        next_values = (
+                            QUOTA_EXHAUSTED,
+                            existing_cpa_reset_at,
+                            now,
+                            row["cpa_status"] or "error",
+                            row["cpa_status_message"] or "The usage limit has been reached",
+                        )
+                    else:
+                        next_values = (None, None, None, None, None)
+                        if row["cpa_synced_at_utc"] is not None:
+                            cleared_rows += 1
 
                 current_values = (
                     row["cpa_quota_status"],

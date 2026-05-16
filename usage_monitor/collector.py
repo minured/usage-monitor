@@ -178,6 +178,7 @@ class CollectorService:
 
         stopped_early = False
         for index, record in enumerate(candidates):
+            self._sync_cpa_status_if_due()
             if self._should_stop_current_round("开始下一个账号前"):
                 stopped_early = True
                 break
@@ -785,6 +786,7 @@ class CollectorService:
 
         poll_interval = min(0.2, remaining_seconds)
         while remaining_seconds > 0:
+            self._sync_cpa_status_if_due()
             if self._should_stop_current_round("账号间隔期间"):
                 return True
             current_sleep = min(poll_interval, remaining_seconds)

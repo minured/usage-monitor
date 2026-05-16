@@ -88,13 +88,14 @@ def parse_auth_file_status(item: dict[str, Any]) -> CPAAuthStatus:
     email = _first_text(item, "email", "account", "label")
     cpa_status = _first_text(item, "status") or "unknown"
     raw_message = _first_text(item, "status_message")
-    message_type, message_text = _extract_message(raw_message)
+    message_type, message_text, message_reset_at_utc = _extract_message(raw_message)
     quota_status = _classify_quota_status(item, cpa_status, message_type, message_text)
+    reset_at_utc = _parse_cpa_time(_first_text(item, "next_retry_after")) or message_reset_at_utc
     return CPAAuthStatus(
         source_file_name=source_file_name,
         email=email,
         quota_status=quota_status,
-        reset_at_utc=_parse_cpa_time(_first_text(item, "next_retry_after")),
+        reset_at_utc=reset_at_utc,
         cpa_status=cpa_status,
         cpa_status_message=_compact_message(message_text or raw_message),
     )
@@ -119,19 +120,20 @@ def _first_text(item: dict[str, Any], *keys: str) -> str:
     return ""
 
 
-def _extract_message(raw: str) -> tuple[str, str]:
+def _extract_message(raw: str) -> tuple[str, str, str | None]:
     if not raw:
-        return "", ""
+        return "", "", None
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        return "", raw
+        return "", raw, None
 
     found_type = ""
     found_message = ""
+    found_reset_at_utc: str | None = None
 
     def walk(value: Any) -> None:
-        nonlocal found_type, found_message
+        nonlocal found_type, found_message, found_reset_at_utc
         if isinstance(value, dict):
             for key, child in value.items():
                 lowered = str(key).lower()
@@ -140,13 +142,15 @@ def _extract_message(raw: str) -> tuple[str, str]:
                 elif lowered in {"message", "error", "detail"} and not found_message:
                     if not isinstance(child, (dict, list)):
                         found_message = str(child or "").strip()
+                elif lowered in {"resets_at", "reset_at"} and found_reset_at_utc is None:
+                    found_reset_at_utc = _parse_cpa_epoch_time(child) or _parse_cpa_time(str(child or ""))
                 walk(child)
         elif isinstance(value, list):
             for child in value[:5]:
                 walk(child)
 
     walk(payload)
-    return found_type, found_message
+    return found_type, found_message, found_reset_at_utc
 
 
 def _classify_quota_status(
@@ -169,6 +173,21 @@ def _classify_quota_status(
     if cpa_status.lower() == "active" and item.get("disabled") is not True:
         return QUOTA_AVAILABLE
     return QUOTA_UNKNOWN
+
+
+def _parse_cpa_epoch_time(raw: Any) -> str | None:
+    if isinstance(raw, bool):
+        return None
+    try:
+        timestamp = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if timestamp <= 0:
+        return None
+    try:
+        return format_utc(datetime.fromtimestamp(timestamp, tz=timezone.utc))
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _parse_cpa_time(raw: str) -> str | None:
