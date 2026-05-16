@@ -821,7 +821,8 @@ class UsageMonitorTestCase(unittest.TestCase):
                     "source_file_name": "a2.json",
                     "email": "a2@example.com",
                     "quota_status": QUOTA_EXHAUSTED,
-                    "reset_at_utc": "2026-03-19T00:00:00Z",
+                    # 使用遥远的未来时间，确保测试不依赖运行当天日期。
+                    "reset_at_utc": "9999-12-31T23:59:59Z",
                     "cpa_status": "error",
                     "cpa_status_message": "The usage limit has been reached",
                 },
@@ -838,7 +839,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual([item["email"] for item in payload["items"]], ["a2@example.com"])
         self.assertEqual(payload["items"][0]["quota_status"], QUOTA_EXHAUSTED)
         self.assertEqual(payload["items"][0]["remaining_percent_text"], "0%")
-        self.assertEqual(payload["items"][0]["reset_at_utc"], "2026-03-19T00:00:00Z")
+        self.assertEqual(payload["items"][0]["reset_at_utc"], "9999-12-31T23:59:59Z")
 
         official_payload = build_dashboard_payload(self.settings, "exhausted", database)
         self.assertEqual(official_payload["summary"]["exhausted"], 0)
@@ -976,6 +977,42 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(payload["summary"]["available"], 0)
         self.assertEqual(payload["summary"]["exhausted"], 1)
         self.assertEqual(payload["items"][0]["reset_at_utc"], "9999-12-31T23:59:59Z")
+
+    def test_expired_cpa_exhausted_does_not_override_official_available(self) -> None:
+        database = UsageDatabase(self.settings.db_path)
+        database.initialize()
+        database.upsert_account(
+            self._account_payload(
+                "a1",
+                QUOTA_AVAILABLE,
+                checked_at="2026-03-18T00:00:00Z",
+            )
+        )
+
+        database.sync_cpa_statuses(
+            [
+                {
+                    "source_file_name": "a1.json",
+                    "email": "a1@example.com",
+                    "quota_status": QUOTA_EXHAUSTED,
+                    "reset_at_utc": "2000-01-01T00:00:00Z",
+                    "cpa_status": "error",
+                    "cpa_status_message": "The usage limit has been reached",
+                }
+            ],
+            cpa_stale_seconds=120,
+        )
+
+        cpa_settings = replace(self.settings, cpa_status_enabled=True, cpa_status_stale_seconds=120)
+        payload = build_dashboard_payload(cpa_settings, "all", database)
+        exhausted_payload = build_dashboard_payload(cpa_settings, "exhausted", database)
+
+        self.assertEqual(payload["summary"]["available"], 1)
+        self.assertEqual(payload["summary"]["exhausted"], 0)
+        self.assertEqual(exhausted_payload["items"], [])
+        self.assertEqual(payload["items"][0]["quota_status"], QUOTA_AVAILABLE)
+        self.assertEqual(payload["items"][0]["remaining_percent_text"], "90%")
+        self.assertEqual(payload["items"][0]["reset_at_utc"], "2026-03-18T01:00:00Z")
 
     def test_dashboard_overview_payload_omits_items(self) -> None:
         database = UsageDatabase(self.settings.db_path)

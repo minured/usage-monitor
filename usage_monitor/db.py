@@ -416,6 +416,18 @@ class UsageDatabase:
         )
 
     @staticmethod
+    def _cpa_status_overlay_enabled(cpa_stale_seconds: float | None) -> bool:
+        """判断 Dashboard 是否允许使用 CPA overlay。"""
+
+        if cpa_stale_seconds is None:
+            return True
+        try:
+            stale_seconds = float(cpa_stale_seconds)
+        except (TypeError, ValueError):
+            return True
+        return stale_seconds > 0
+
+    @staticmethod
     def _cpa_cutoff_utc(cpa_stale_seconds: float | None) -> str:
         if cpa_stale_seconds is None:
             cpa_stale_seconds = DEFAULT_CPA_STATUS_STALE_SECONDS
@@ -431,8 +443,10 @@ class UsageDatabase:
     def _effective_accounts_sql(cls, cpa_stale_seconds: float | None) -> tuple[str, tuple[Any, ...]]:
         cutoff_utc = cls._cpa_cutoff_utc(cpa_stale_seconds)
         now_utc = format_utc(utc_now())
+        cpa_overlay_enabled = 1 if cls._cpa_status_overlay_enabled(cpa_stale_seconds) else 0
         freshness_expr = (
-            "lifecycle_status = ? "
+            "? = 1 "
+            "AND lifecycle_status = ? "
             "AND cpa_synced_at_utc IS NOT NULL "
             "AND cpa_synced_at_utc >= ? "
             "AND cpa_quota_status IN (?, ?, ?)"
@@ -446,18 +460,31 @@ class UsageDatabase:
             "AND reset_at_utc > ?"
         )
         cpa_sticky_exhausted_expr = (
-            "cpa_quota_status = ? "
+            "? = 1 "
+            "AND cpa_quota_status = ? "
             "AND cpa_reset_at_utc IS NOT NULL "
             "AND cpa_reset_at_utc != '' "
             "AND cpa_reset_at_utc > ?"
         )
+        # CPA 的 usage_limit_reached 可能在 auth-files 中长期残留；如果它自带的
+        # reset 时间已经过去，就不能继续覆盖官方扫描出的 available。没有 reset
+        # 的 CPA exhausted 仍按当前状态处理，避免漏掉 CPA 已知但未携带时间的耗尽。
+        cpa_current_exhausted_expr = (
+            "? = 1 "
+            "AND cpa_quota_status = ? "
+            "AND (cpa_reset_at_utc IS NULL "
+            "OR cpa_reset_at_utc = '' "
+            "OR cpa_reset_at_utc > ?)"
+        )
         freshness_params: tuple[Any, ...] = (
+            cpa_overlay_enabled,
             LIFECYCLE_ACTIVE,
             cutoff_utc,
             *CPA_QUOTA_VALUES,
         )
         sticky_exhausted_params: tuple[Any, ...] = (QUOTA_EXHAUSTED, now_utc)
-        cpa_sticky_exhausted_params: tuple[Any, ...] = (QUOTA_EXHAUSTED, now_utc)
+        cpa_sticky_exhausted_params: tuple[Any, ...] = (cpa_overlay_enabled, QUOTA_EXHAUSTED, now_utc)
+        cpa_current_exhausted_params: tuple[Any, ...] = (cpa_overlay_enabled, QUOTA_EXHAUSTED, now_utc)
         exhausted_literal = QUOTA_EXHAUSTED.replace("'", "''")
         sql = f"""
             SELECT
@@ -466,9 +493,10 @@ class UsageDatabase:
                     WHEN base.cpa_exhausted_still_waiting
                     THEN '{exhausted_literal}'
                     WHEN base.cpa_status_is_fresh
-                        AND base.cpa_quota_status = '{exhausted_literal}'
+                        AND base.cpa_exhausted_is_current
                     THEN base.cpa_quota_status
                     WHEN base.cpa_status_is_fresh
+                        AND base.cpa_quota_status != '{exhausted_literal}'
                         AND NOT base.official_exhausted_still_waiting
                     THEN base.cpa_quota_status
                     ELSE base.quota_status
@@ -477,13 +505,14 @@ class UsageDatabase:
                     WHEN base.cpa_exhausted_still_waiting
                     THEN base.cpa_reset_at_utc
                     WHEN base.cpa_status_is_fresh
-                        AND base.cpa_quota_status = '{exhausted_literal}'
+                        AND base.cpa_exhausted_is_current
                         AND base.cpa_reset_at_utc IS NOT NULL
                         AND base.cpa_reset_at_utc != ''
                     THEN base.cpa_reset_at_utc
                     WHEN base.official_exhausted_still_waiting
                     THEN base.reset_at_utc
                     WHEN base.cpa_status_is_fresh
+                        AND base.cpa_quota_status != '{exhausted_literal}'
                         AND base.cpa_reset_at_utc IS NOT NULL
                         AND base.cpa_reset_at_utc != ''
                     THEN base.cpa_reset_at_utc
@@ -494,11 +523,18 @@ class UsageDatabase:
                     *,
                     ({freshness_expr}) AS cpa_status_is_fresh,
                     ({sticky_exhausted_expr}) AS official_exhausted_still_waiting,
-                    ({cpa_sticky_exhausted_expr}) AS cpa_exhausted_still_waiting
+                    ({cpa_sticky_exhausted_expr}) AS cpa_exhausted_still_waiting,
+                    ({cpa_current_exhausted_expr}) AS cpa_exhausted_is_current
                 FROM {TABLE_NAME}
             ) AS base
         """
-        return sql, freshness_params + sticky_exhausted_params + cpa_sticky_exhausted_params
+        return (
+            sql,
+            freshness_params
+            + sticky_exhausted_params
+            + cpa_sticky_exhausted_params
+            + cpa_current_exhausted_params,
+        )
 
     def _fetch_summary_counts_in_transaction(
         self,
