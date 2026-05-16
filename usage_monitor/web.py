@@ -587,6 +587,18 @@ def _render_index_styles() -> str:
       letter-spacing: -0.02em;
       white-space: nowrap;
     }
+    .sse-status {
+      display: inline-flex;
+      align-items: center;
+      min-height: 18px;
+      color: var(--invalid);
+      font-size: 11px;
+      line-height: 1;
+      font-weight: 680;
+      white-space: nowrap;
+    }
+    .sse-status.is-connected { color: var(--available); }
+    .sse-status.is-disconnected { color: var(--invalid); }
     .toolbar-subtitle,
     .toolbar-stats,
     .meta-pair {
@@ -1578,6 +1590,7 @@ def _render_index_header() -> str:
       <section class="app-toolbar surface" aria-label="usage-monitor 工具栏">
         <div class="brand-row">
           <h1 class="title">usage-monitor</h1>
+          <span id="sse-status" class="sse-status is-disconnected" aria-live="polite">SSE 未连接</span>
         </div>
         <div class="run-line toolbar-progress" aria-label="本轮进度">
           <div class="run-progress-label">
@@ -2359,13 +2372,30 @@ def _render_index_script(
       return window.innerWidth <= MOBILE_LAYOUT_BREAKPOINT ? "mobile" : "desktop";
     }}
 
+    function renderEventStreamStatus() {{
+      const element = document.getElementById("sse-status");
+      if (!element) {{
+        return;
+      }}
+      const connected = Boolean(state.eventStreamConnected);
+      element.textContent = connected ? "SSE 已连接" : "SSE 未连接";
+      element.className = `sse-status ${{connected ? "is-connected" : "is-disconnected"}}`;
+      element.title = connected ? "实时推送已连接" : "实时推送未连接";
+    }}
+
+    function setEventStreamConnected(connected) {{
+      state.eventStreamConnected = Boolean(connected);
+      renderEventStreamStatus();
+    }}
+
     function closeEventStream() {{
       if (!state.eventSource) {{
+        setEventStreamConnected(false);
         return;
       }}
       state.eventSource.close();
       state.eventSource = null;
-      state.eventStreamConnected = false;
+      setEventStreamConnected(false);
     }}
 
     function getEventStreamUrl() {{
@@ -2510,6 +2540,7 @@ def _render_index_script(
 
     function connectEventStream(showBusy = false) {{
       if (typeof window.EventSource !== "function") {{
+        setEventStreamConnected(false);
         showError("当前浏览器不支持实时更新，请更换浏览器。");
         return;
       }}
@@ -2526,7 +2557,7 @@ def _render_index_script(
         if (state.eventSource !== source) {{
           return;
         }}
-        state.eventStreamConnected = true;
+        setEventStreamConnected(true);
         state.reconnectMessageShown = false;
         showError("");
       }});
@@ -2568,7 +2599,7 @@ def _render_index_script(
         if (state.eventSource !== source) {{
           return;
         }}
-        state.eventStreamConnected = false;
+        setEventStreamConnected(false);
         setDashboardBusy(false);
         if (!state.reconnectMessageShown) {{
           showError("实时连接中断，正在自动重连...");
@@ -3433,6 +3464,7 @@ def _render_index_script(
     updateControlButtons(initialProgressPayload);
     refreshLiveCountdowns();
     window.setInterval(refreshLiveCountdowns, 1000);
+    renderEventStreamStatus();
     window.requestAnimationFrame(syncStickyHeaderLayout);
     connectEventStream(false);
   """.strip()
