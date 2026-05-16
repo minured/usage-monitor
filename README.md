@@ -9,7 +9,8 @@
 - 页面顶部支持当前轮次进度查看、手动开始下一轮、手动安全停止本轮
 - 可选只读 CPA auth-files 接口，用 CPA 已知的实时账号状态修正展示时效性
 
-当前版本只保留“最新状态”，不保存历史快照。
+<img width="1508" height="646" alt="image" src="https://github.com/user-attachments/assets/367d3950-d7ff-4311-a62c-a3d328d04815" />
+
 
 ## 目录说明
 
