@@ -566,7 +566,7 @@ def _render_index_styles() -> str:
     }
     .app-toolbar {
       display: grid;
-      grid-template-columns: minmax(148px, auto) minmax(320px, 1fr) auto;
+      grid-template-columns: minmax(190px, auto) minmax(300px, 420px) minmax(max-content, 1fr);
       align-items: center;
       gap: 10px;
       min-height: 42px;
@@ -588,17 +588,22 @@ def _render_index_styles() -> str:
       white-space: nowrap;
     }
     .sse-status {
+      --sse-color: var(--invalid);
       display: inline-flex;
       align-items: center;
       min-height: 18px;
-      color: var(--invalid);
-      font-size: 11px;
+      padding: 0 5px;
+      border: 1px solid color-mix(in srgb, var(--sse-color) 22%, transparent);
+      border-radius: var(--radius-sm);
+      background: color-mix(in srgb, var(--sse-color) 7%, #ffffff);
+      color: var(--sse-color);
+      font-size: 10px;
       line-height: 1;
       font-weight: 680;
       white-space: nowrap;
     }
-    .sse-status.is-connected { color: var(--available); }
-    .sse-status.is-disconnected { color: var(--invalid); }
+    .sse-status.is-connected { --sse-color: var(--available); }
+    .sse-status.is-disconnected { --sse-color: var(--invalid); }
     .toolbar-subtitle,
     .toolbar-stats,
     .meta-pair {
@@ -646,12 +651,13 @@ def _render_index_styles() -> str:
     }
     .run-line {
       display: grid;
-      grid-template-columns: auto minmax(140px, 1fr) minmax(220px, auto);
+      grid-template-columns: auto minmax(92px, 1fr) auto;
       align-items: center;
       gap: 8px;
       min-width: 0;
     }
     .toolbar-progress {
+      width: min(100%, 420px);
       min-width: 0;
     }
     .run-progress-label {
@@ -1525,8 +1531,8 @@ def _render_index_styles() -> str:
       .app-toolbar { grid-template-columns: 1fr; align-items: start; }
       .toolbar-actions,
       .run-meta { justify-content: flex-start; }
-      .run-line { grid-template-columns: auto minmax(160px, 1fr); }
-      .run-meta { grid-column: 1 / -1; }
+      .run-line { grid-template-columns: auto minmax(120px, 1fr) auto; }
+      .run-meta { grid-column: auto; }
       .summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     }
     @media (max-width: 900px) {
@@ -1590,7 +1596,7 @@ def _render_index_header() -> str:
       <section class="app-toolbar surface" aria-label="usage-monitor 工具栏">
         <div class="brand-row">
           <h1 class="title">usage-monitor</h1>
-          <span id="sse-status" class="sse-status is-disconnected" aria-live="polite">SSE 未连接</span>
+          <span id="sse-status" class="sse-status is-disconnected" aria-live="polite">SSE 离线</span>
         </div>
         <div class="run-line toolbar-progress" aria-label="本轮进度">
           <div class="run-progress-label">
@@ -1602,18 +1608,18 @@ def _render_index_header() -> str:
             <div id="progress-bar" class="progress-bar"></div>
           </div>
           <div class="run-meta" aria-label="进度统计">
-            <span class="run-meta-item run-account">当前 <b id="progress-account">-</b></span>
             <span class="run-meta-item">下轮 <b id="progress-next-round">-</b></span>
           </div>
         </div>
         <div class="toolbar-actions">
-          <button id="scan-trigger-button" type="button" class="action-button" disabled>手动开始扫描</button>
+          <button id="scan-trigger-button" type="button" class="action-button" disabled>手动扫描</button>
           <button id="scan-stop-button" type="button" class="action-button action-button-danger" disabled>停止本轮</button>
         </div>
         <div class="hidden-runtime-fields" aria-hidden="true">
           <span id="current-filter">active</span>
           <strong id="toolbar-total">0</strong>
           <span id="generated-at">-</span>
+          <span id="progress-account">-</span>
           <span id="progress-total-scanned">-</span>
           <span id="progress-total-candidates">-</span>
           <span id="progress-skipped">-</span>
@@ -2378,7 +2384,7 @@ def _render_index_script(
         return;
       }}
       const connected = Boolean(state.eventStreamConnected);
-      element.textContent = connected ? "SSE 已连接" : "SSE 未连接";
+      element.textContent = connected ? "SSE" : "SSE 离线";
       element.className = `sse-status ${{connected ? "is-connected" : "is-disconnected"}}`;
       element.title = connected ? "实时推送已连接" : "实时推送未连接";
     }}
@@ -2624,7 +2630,7 @@ def _render_index_script(
         return;
       }}
       if (state.controlRequestInFlight === "stop") {{
-        startButton.textContent = "手动开始扫描";
+        startButton.textContent = "手动扫描";
         stopButton.textContent = "停止提交中...";
         return;
       }}
@@ -2632,7 +2638,7 @@ def _render_index_script(
       if (payload.manual_trigger_pending) {{
         startButton.textContent = "已请求，等待开始";
       }} else {{
-        startButton.textContent = "手动开始扫描";
+        startButton.textContent = "手动扫描";
       }}
 
       if (payload.manual_stop_pending) {{
