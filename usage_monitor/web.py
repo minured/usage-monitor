@@ -1773,7 +1773,12 @@ def _render_index_script(
       filter: "active",
       eventSource: null,
       eventStreamConnected: false,
+      eventReconnectTimer: 0,
       reconnectMessageShown: false,
+      resumeSyncNeeded: false,
+      resumeSyncInFlight: false,
+      resumeSyncTimer: 0,
+      lastResumeSyncAt: 0,
       lastProgressPhase: String(initialProgressPayload.phase || ""),
       lastProgressPayload: initialProgressPayload,
       controlRequestInFlight: "",
@@ -1797,6 +1802,8 @@ def _render_index_script(
     const quotaOrder = {quota_order_js};
     const urlPrefix = {url_prefix_js};
     const SUMMARY_TREND_STORAGE_KEY = "usage-monitor.summaryTrendVisible";
+    const EVENT_STREAM_RECONNECT_DELAY_MS = 1500;
+    const RESUME_SYNC_COOLDOWN_MS = 1200;
     const labels = {{
       lifecycle: {{
         active: "active",
@@ -2419,7 +2426,24 @@ def _render_index_script(
       renderEventStreamStatus();
     }}
 
+    function clearEventReconnectTimer() {{
+      if (!state.eventReconnectTimer) {{
+        return;
+      }}
+      window.clearTimeout(state.eventReconnectTimer);
+      state.eventReconnectTimer = 0;
+    }}
+
+    function clearResumeSyncTimer() {{
+      if (!state.resumeSyncTimer) {{
+        return;
+      }}
+      window.clearTimeout(state.resumeSyncTimer);
+      state.resumeSyncTimer = 0;
+    }}
+
     function closeEventStream() {{
+      clearEventReconnectTimer();
       if (!state.eventSource) {{
         setEventStreamConnected(false);
         return;
@@ -2569,6 +2593,113 @@ def _render_index_script(
       state.lastProgressPayload = payload;
     }}
 
+    function isRealtimePageActive() {{
+      const isHidden = typeof document !== "undefined" && document.visibilityState === "hidden";
+      const isOffline = typeof navigator !== "undefined" && navigator.onLine === false;
+      return !isHidden && !isOffline;
+    }}
+
+    function markResumeSyncNeeded() {{
+      state.resumeSyncNeeded = true;
+    }}
+
+    async function fetchJsonPayload(path) {{
+      const response = await fetch(withPrefix(path), {{ cache: "no-store" }});
+      if (!response.ok) {{
+        throw new Error(`request failed: ${{response.status}}`);
+      }}
+      return response.json();
+    }}
+
+    function scheduleResumeSync(delayMs = RESUME_SYNC_COOLDOWN_MS) {{
+      clearResumeSyncTimer();
+      if (!isRealtimePageActive()) {{
+        markResumeSyncNeeded();
+        return;
+      }}
+      state.resumeSyncTimer = window.setTimeout(() => {{
+        state.resumeSyncTimer = 0;
+        void runResumeSync({{ force: true }});
+      }}, Math.max(0, delayMs));
+    }}
+
+    async function runResumeSync(options = {{}}) {{
+      const force = Boolean(options.force);
+      if (!isRealtimePageActive()) {{
+        markResumeSyncNeeded();
+        return;
+      }}
+      if (!force && !state.resumeSyncNeeded) {{
+        return;
+      }}
+      if (state.resumeSyncInFlight) {{
+        return;
+      }}
+
+      const now = Date.now();
+      const waitMs = RESUME_SYNC_COOLDOWN_MS - (now - Number(state.lastResumeSyncAt || 0));
+      if (!force && waitMs > 0) {{
+        scheduleResumeSync(waitMs);
+        return;
+      }}
+
+      clearResumeSyncTimer();
+      state.resumeSyncNeeded = false;
+      state.resumeSyncInFlight = true;
+      state.lastResumeSyncAt = now;
+      try {{
+        const [progressPayload, dashboardPayload] = await Promise.all([
+          fetchJsonPayload("/api/progress"),
+          fetchJsonPayload("/api/dashboard?filter=all")
+        ]);
+        applyProgressPayload(progressPayload);
+        updateControlButtons(progressPayload, true);
+        applyDashboardSnapshot(dashboardPayload);
+        state.reconnectMessageShown = false;
+        showError("");
+      }} catch (_error) {{
+        markResumeSyncNeeded();
+        if (!state.reconnectMessageShown) {{
+          showError("实时连接中断，正在自动重连...");
+          state.reconnectMessageShown = true;
+        }}
+        scheduleEventStreamReconnect();
+      }} finally {{
+        state.resumeSyncInFlight = false;
+      }}
+    }}
+
+    function scheduleEventStreamReconnect(delayMs = EVENT_STREAM_RECONNECT_DELAY_MS) {{
+      if (state.eventReconnectTimer) {{
+        return;
+      }}
+      if (!isRealtimePageActive()) {{
+        markResumeSyncNeeded();
+        return;
+      }}
+      state.eventReconnectTimer = window.setTimeout(() => {{
+        state.eventReconnectTimer = 0;
+        if (!isRealtimePageActive()) {{
+          markResumeSyncNeeded();
+          return;
+        }}
+        connectEventStream(false);
+        void runResumeSync({{ force: true }});
+      }}, Math.max(0, delayMs));
+    }}
+
+    function handleRealtimeResume() {{
+      if (!isRealtimePageActive()) {{
+        markResumeSyncNeeded();
+        return;
+      }}
+      if (!state.eventStreamConnected || state.resumeSyncNeeded) {{
+        markResumeSyncNeeded();
+        scheduleEventStreamReconnect(0);
+      }}
+      void runResumeSync();
+    }}
+
     function connectEventStream(showBusy = false) {{
       if (typeof window.EventSource !== "function") {{
         setEventStreamConnected(false);
@@ -2588,9 +2719,11 @@ def _render_index_script(
         if (state.eventSource !== source) {{
           return;
         }}
+        clearEventReconnectTimer();
         setEventStreamConnected(true);
         state.reconnectMessageShown = false;
         showError("");
+        void runResumeSync();
       }});
 
       source.addEventListener("progress", (event) => {{
@@ -2632,10 +2765,12 @@ def _render_index_script(
         }}
         setEventStreamConnected(false);
         setDashboardBusy(false);
+        markResumeSyncNeeded();
         if (!state.reconnectMessageShown) {{
           showError("实时连接中断，正在自动重连...");
           state.reconnectMessageShown = true;
         }}
+        scheduleEventStreamReconnect();
       }};
     }}
 
@@ -3488,12 +3623,30 @@ def _render_index_script(
 
     window.addEventListener("blur", () => {{
       clearExhaustedTrendHover();
+      markResumeSyncNeeded();
     }});
 
     document.addEventListener("visibilitychange", () => {{
       if (document.hidden) {{
         clearExhaustedTrendHover();
+        markResumeSyncNeeded();
+        return;
       }}
+      handleRealtimeResume();
+    }});
+
+    window.addEventListener("focus", handleRealtimeResume);
+    window.addEventListener("pageshow", handleRealtimeResume);
+    window.addEventListener("pagehide", () => {{
+      markResumeSyncNeeded();
+    }});
+    window.addEventListener("online", () => {{
+      markResumeSyncNeeded();
+      handleRealtimeResume();
+    }});
+    window.addEventListener("offline", () => {{
+      setEventStreamConnected(false);
+      markResumeSyncNeeded();
     }});
 
     document.addEventListener("click", (event) => {{
@@ -3569,6 +3722,7 @@ def _render_index_script(
     );
 
     window.addEventListener("beforeunload", () => {{
+      clearResumeSyncTimer();
       closeEventStream();
     }});
 
