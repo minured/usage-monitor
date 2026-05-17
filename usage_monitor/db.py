@@ -950,7 +950,10 @@ class UsageDatabase:
         safe_hours = max(1, min(safe_hours, 1000))
 
         parsed_now = parse_utc(now_utc) if now_utc else None
-        window_start_at = parsed_now or utc_now()
+        actual_start_at = parsed_now or utc_now()
+        # 图表历史段按小时桶展示；未来恢复段也对齐到当前小时整点，
+        # 保持横轴端点一致，避免出现 17:07 这类非整点标签。
+        window_start_at = actual_start_at.replace(minute=0, second=0, microsecond=0)
         window_end_at = window_start_at + timedelta(hours=safe_hours)
         effective_sql, effective_params = self._effective_accounts_sql(cpa_stale_seconds)
 
@@ -970,7 +973,8 @@ class UsageDatabase:
             reset_at = parse_utc(str(row["effective_reset_at_utc"] or ""))
             if reset_at is None:
                 continue
-            if window_start_at < reset_at <= window_end_at:
+            # 当前时刻以前已经到期但仍处于 exhausted 的账号，不能被当作未来恢复。
+            if actual_start_at < reset_at <= window_end_at:
                 reset_events.append(reset_at)
         reset_events.sort()
 

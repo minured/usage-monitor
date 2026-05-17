@@ -755,6 +755,7 @@ class UsageMonitorTestCase(unittest.TestCase):
             ("recover-soon", "2026-03-18T04:00:00Z"),
             ("recover-later", "2026-03-18T05:45:00Z"),
             ("recover-outside", "2026-03-18T08:00:00Z"),
+            ("recover-past", "2026-03-18T03:30:00Z"),
             ("recover-unknown", None),
         ):
             database.upsert_account(
@@ -782,14 +783,14 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(
             [point["projected_at_utc"] for point in projection],
             [
-                "2026-03-18T03:45:00Z",
-                "2026-03-18T04:45:00Z",
-                "2026-03-18T05:45:00Z",
-                "2026-03-18T06:45:00Z",
+                "2026-03-18T03:00:00Z",
+                "2026-03-18T04:00:00Z",
+                "2026-03-18T05:00:00Z",
+                "2026-03-18T06:00:00Z",
             ],
         )
-        self.assertEqual([point["exhausted"] for point in projection], [4, 3, 2, 2])
-        self.assertEqual([point["recovered"] for point in projection], [0, 1, 2, 2])
+        self.assertEqual([point["exhausted"] for point in projection], [5, 4, 4, 3])
+        self.assertEqual([point["recovered"] for point in projection], [0, 1, 1, 2])
 
     def test_cpa_auth_file_status_parser_handles_usage_limit(self) -> None:
         status = parse_auth_file_status(
