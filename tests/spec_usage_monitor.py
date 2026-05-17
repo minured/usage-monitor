@@ -216,6 +216,7 @@ class UsageMonitorTestCase(unittest.TestCase):
             "email": f"{account_id}@example.com",
             "source_file": f"/tmp/{account_id}.json",
             "source_mtime_ns": 1,
+            "source_created_at_utc": "2026-03-01T10:20:30Z",
             "lifecycle_status": lifecycle_status,
             "quota_status": quota_status,
             "plan_type": "team",
@@ -1095,6 +1096,22 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(payload["filter"], "all")
         self.assertEqual(payload["summary"]["total"], 1)
         self.assertNotIn("items", payload)
+
+    def test_dashboard_payload_includes_source_file_created_time(self) -> None:
+        database = UsageDatabase(self.settings.db_path)
+        database.initialize()
+        account_payload = self._account_payload(
+            "created-at",
+            QUOTA_AVAILABLE,
+            checked_at="2026-03-18T00:00:00Z",
+        )
+        account_payload["source_created_at_utc"] = "2026-03-01T10:20:30Z"
+        database.upsert_account(account_payload)
+
+        payload = build_dashboard_payload(self.settings, "all", database)
+
+        self.assertEqual(payload["items"][0]["source_file_name"], "created-at.json")
+        self.assertEqual(payload["items"][0]["source_created_at_utc"], "2026-03-01T10:20:30Z")
 
     def test_dashboard_patch_payload_tracks_upserts_and_removals(self) -> None:
         previous_payload = {
@@ -2310,6 +2327,12 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertIn("getPlanTypePriority(left.plan_type)", body)
         self.assertIn("getPlanTypePriority(right.plan_type)", body)
         self.assertIn("function formatCompactDateTimeText(value) {", body)
+        self.assertIn("function formatElapsedMinutesSince(value) {", body)
+        self.assertIn("function refreshCreatedAgeLabels() {", body)
+        self.assertIn('data-sort-key="source_created_at_utc"', body)
+        self.assertIn('data-label="创建时间"', body)
+        self.assertIn("data-created-age data-created-at=", body)
+        self.assertIn("col-source-created", body)
         self.assertIn("function buildLinearTrendPath(points) {", body)
         self.assertIn("const xForMillis = (millis) => {", body)
         self.assertIn("const hoverPoints = [...historyChartPoints, ...recoveryChartPoints]", body)

@@ -352,6 +352,7 @@ def build_dashboard_payload(
                 "remaining_percent_text": remaining_percent_text,
                 "remaining_percent_value": remaining_percent_value,
                 "reset_at_utc": reset_at_utc,
+                "source_created_at_utc": str(row["source_created_at_utc"] or ""),
                 "last_checked_at_utc": last_checked_at_utc,
                 "note": note or "-",
                 "source_file": source_file,
@@ -443,6 +444,7 @@ _TABLE_COLUMN_SPECS: tuple[tuple[str, str, str], ...] = (
     ("lifecycle_status", "生命周期", "col-lifecycle"),
     ("remaining_percent_value", "剩余", "col-remaining"),
     ("reset_at_utc", "重置时间", "col-reset"),
+    ("source_created_at_utc", "创建时间", "col-source-created"),
     ("last_checked_at_utc", "最近查询", "col-last-checked"),
     ("note", "备注", "col-note"),
 )
@@ -1235,7 +1237,7 @@ def _render_index_styles() -> str:
     .sticky-table,
     table {
       width: 100%;
-      min-width: 1040px;
+      min-width: 1200px;
       border-collapse: separate;
       border-spacing: 0;
       table-layout: fixed;
@@ -1303,11 +1305,12 @@ def _render_index_styles() -> str:
       color: var(--text);
       font-weight: 720;
     }
-    .col-email { width: 32%; min-width: 280px; }
+    .col-email { width: 24%; min-width: 220px; }
     .col-lifecycle { width: 112px; min-width: 112px; white-space: nowrap; }
     .col-remaining { width: 132px; min-width: 132px; }
-    .col-reset { width: 170px; min-width: 170px; white-space: nowrap; }
-    .col-last-checked { width: 150px; min-width: 150px; white-space: nowrap; }
+    .col-reset { width: 166px; min-width: 166px; white-space: nowrap; }
+    .col-source-created { width: 156px; min-width: 156px; white-space: nowrap; }
+    .col-last-checked { width: 144px; min-width: 144px; white-space: nowrap; }
     .col-note { width: 280px; white-space: normal; }
     tbody tr { transition: background-color 120ms ease; }
     tbody tr:hover { background: #fbfaf7; }
@@ -1411,6 +1414,12 @@ def _render_index_styles() -> str:
       color: var(--filter-active);
       font-size: 11px;
       font-weight: 680;
+      font-variant-numeric: tabular-nums;
+    }
+    .cell-time-elapsed {
+      color: var(--muted-soft);
+      font-size: 11px;
+      font-weight: 620;
       font-variant-numeric: tabular-nums;
     }
     .status-pill {
@@ -2048,6 +2057,28 @@ def _render_index_script(
       return `剩 ${{minutes}}分`;
     }}
 
+    function formatElapsedMinutesSince(value) {{
+      const startMillis = parseUtcMillis(value);
+      if (startMillis === null) {{
+        return "";
+      }}
+      const elapsedMs = Date.now() - startMillis;
+      if (elapsedMs < 60000) {{
+        return "刚刚";
+      }}
+      const totalMinutes = Math.max(1, Math.floor(elapsedMs / 60000));
+      const days = Math.floor(totalMinutes / 1440);
+      const hours = Math.floor((totalMinutes % 1440) / 60);
+      const minutes = totalMinutes % 60;
+      if (days > 0) {{
+        return `已过 ${{days}}天 ${{hours}}小时`;
+      }}
+      if (hours > 0) {{
+        return `已过 ${{hours}}小时 ${{minutes}}分`;
+      }}
+      return `已过 ${{minutes}}分`;
+    }}
+
     function refreshNextRoundCountdown() {{
       const element = document.getElementById("progress-next-round");
       if (!element) {{
@@ -2078,9 +2109,19 @@ def _render_index_script(
       }});
     }}
 
+    function refreshCreatedAgeLabels() {{
+      document.querySelectorAll("[data-created-age]").forEach((element) => {{
+        const target = element.getAttribute("data-created-at") || "";
+        const elapsed = formatElapsedMinutesSince(target);
+        element.textContent = elapsed || "-";
+        element.setAttribute("title", formatUtcToShanghai(target, "") || "-");
+      }});
+    }}
+
     function refreshLiveCountdowns() {{
       refreshNextRoundCountdown();
       refreshResetCountdowns();
+      refreshCreatedAgeLabels();
       refreshExhaustedRecoveryCountdown();
     }}
 
@@ -2159,7 +2200,7 @@ def _render_index_script(
       `;
     }}
 
-    function renderDateTimeCell(value, withCountdown = false) {{
+    function renderDateTimeCell(value, withCountdown = false, options = {{}}) {{
       const target = String(value || "").trim();
       const text = formatUtcToShanghai(target, "");
       if (!text || text === "-") {{
@@ -2168,6 +2209,10 @@ def _render_index_script(
       const countdownHtml = withCountdown
         ? `<span class="cell-time-countdown" data-reset-countdown data-countdown-target="${{escapeHtml(target)}}">${{escapeHtml(formatDurationMinutesFromNow(target) || "-")}}</span>`
         : "";
+      const elapsedHtml = options.elapsed
+        ? `<span class="cell-time-elapsed" data-created-age data-created-at="${{escapeHtml(target)}}">${{escapeHtml(formatElapsedMinutesSince(target) || "-")}}</span>`
+        : "";
+      const extraHtml = `${{countdownHtml}}${{elapsedHtml}}`;
       const parts = text.split(" ");
       if (parts.length >= 2) {{
         const datePart = parts[0] || "-";
@@ -2176,11 +2221,11 @@ def _render_index_script(
           <div class="cell-time">
             <span class="cell-time-date">${{escapeHtml(datePart)}}</span>
             <span class="cell-time-clock">${{escapeHtml(timePart)}}</span>
-            ${{countdownHtml}}
+            ${{extraHtml}}
           </div>
         `;
       }}
-      return `<div class="cell-time"><span class="cell-time-date">${{escapeHtml(text)}}</span>${{countdownHtml}}</div>`;
+      return `<div class="cell-time"><span class="cell-time-date">${{escapeHtml(text)}}</span>${{extraHtml}}</div>`;
     }}
 
     function renderMobileMetric(label, value, extraClass = "") {{
@@ -2202,6 +2247,18 @@ def _render_index_script(
         <span class="mobile-metric">
           <span class="mobile-metric-label">重</span>
           <span class="mobile-metric-value mono" data-reset-countdown data-countdown-target="${{escapeHtml(target)}}" title="${{escapeHtml(title)}}">${{escapeHtml(text)}}</span>
+        </span>
+      `;
+    }}
+
+    function renderMobileCreatedMetric(value) {{
+      const target = String(value || "").trim();
+      const text = formatElapsedMinutesSince(target) || formatCompactDateTimeText(target);
+      const title = formatUtcToShanghai(target, "") || text;
+      return `
+        <span class="mobile-metric">
+          <span class="mobile-metric-label">建</span>
+          <span class="mobile-metric-value mono" data-created-age data-created-at="${{escapeHtml(target)}}" title="${{escapeHtml(title)}}">${{escapeHtml(text)}}</span>
         </span>
       `;
     }}
@@ -2238,6 +2295,7 @@ def _render_index_script(
                   </div>
                   ${{renderMobileMetric("余", remainingText, "is-primary")}}
                   ${{renderMobileResetMetric(item.reset_at_utc || "")}}
+                  ${{renderMobileCreatedMetric(item.source_created_at_utc || "")}}
                   ${{renderMobileMetric("查", checkedText, "mono")}}
                 </div>
               </div>
@@ -3500,6 +3558,7 @@ def _render_index_script(
         case "remaining_percent_value":
           return item.remaining_percent_value;
         case "reset_at_utc":
+        case "source_created_at_utc":
         case "last_checked_at_utc":
           return item[key] || "";
         default:
@@ -3586,6 +3645,9 @@ def _render_index_script(
           <td data-label="重置时间" class="mono col-reset">
             ${{renderDateTimeCell(item.reset_at_utc || "", true)}}
           </td>
+          <td data-label="创建时间" class="mono col-source-created">
+            ${{renderDateTimeCell(item.source_created_at_utc || "", false, {{ elapsed: true }})}}
+          </td>
           <td data-label="最近查询" class="mono col-last-checked">
             ${{renderDateTimeCell(item.last_checked_at_utc || "")}}
           </td>
@@ -3596,6 +3658,7 @@ def _render_index_script(
       `).join("");
       tbody.innerHTML = rows;
       refreshResetCountdowns();
+      refreshCreatedAgeLabels();
       window.requestAnimationFrame(syncStickyHeaderLayout);
     }}
 
@@ -3682,7 +3745,7 @@ def _render_index_script(
         state.sortDirection = state.sortDirection === "asc" ? "desc" : "asc";
       }} else {{
         state.sortKey = key;
-        state.sortDirection = key === "last_checked_at_utc" ? "desc" : "asc";
+        state.sortDirection = key === "last_checked_at_utc" || key === "source_created_at_utc" ? "desc" : "asc";
       }}
       renderRows(state.items);
       renderSortButtons();

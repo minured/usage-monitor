@@ -6,7 +6,9 @@ import base64
 import json
 import os
 import shutil
+import subprocess
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +55,34 @@ def _required_string(data: dict[str, Any], field: str, path: Path) -> str:
     if not value:
         raise ValueError(f"缺少有效字段 {field}: {path}")
     return value
+
+
+def _format_unix_utc(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _source_created_at_utc(path: Path, stat_result: os.stat_result | None = None) -> str:
+    """读取 JSON 文件创建时间；Linux 下优先使用 GNU stat 的 birth time。"""
+
+    stat_result = stat_result or path.stat()
+    native_birth = getattr(stat_result, "st_birthtime", None)
+    if isinstance(native_birth, (int, float)) and native_birth > 0:
+        return _format_unix_utc(float(native_birth))
+
+    try:
+        output = subprocess.check_output(
+            ["stat", "-c", "%W", str(path)],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1.0,
+        ).strip()
+        birth_epoch = int(output or "0")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        birth_epoch = 0
+
+    if birth_epoch <= 0:
+        return ""
+    return _format_unix_utc(float(birth_epoch))
 
 
 def _decode_jwt_payload(token: str) -> dict[str, Any]:
@@ -133,6 +163,7 @@ def scan_tokens_dir(tokens_dir: Path) -> tuple[list[TokenRecord], list[str]]:
             refresh_token=_optional_string(raw, "refresh_token"),
             source_file=path.resolve(),
             source_mtime_ns=stat.st_mtime_ns,
+            source_created_at_utc=_source_created_at_utc(path, stat),
             raw_data=raw,
             expired=_optional_string(raw, "expired"),
             id_token=_optional_string(raw, "id_token"),
@@ -202,6 +233,7 @@ def write_refreshed_tokens(record: TokenRecord, refreshed: RefreshedTokens) -> T
         refresh_token=refreshed.refresh_token,
         source_file=record.source_file,
         source_mtime_ns=stat.st_mtime_ns,
+        source_created_at_utc=record.source_created_at_utc or _source_created_at_utc(record.source_file, stat),
         raw_data=latest_raw,
         expired=refreshed.expired,
         id_token=refreshed.id_token or _optional_string(latest_raw, "id_token"),
@@ -255,6 +287,7 @@ def move_token_to_auth_invalid(record: TokenRecord, auth_invalid_dir: Path) -> T
         refresh_token=record.refresh_token,
         source_file=moved_path,
         source_mtime_ns=stat.st_mtime_ns,
+        source_created_at_utc=record.source_created_at_utc or _source_created_at_utc(moved_path, stat),
         raw_data=dict(record.raw_data),
         expired=record.expired,
         id_token=record.id_token,

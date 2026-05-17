@@ -52,6 +52,7 @@ class TokenRecord:
     refresh_token: str
     source_file: Path
     source_mtime_ns: int
+    source_created_at_utc: str = ""
     raw_data: dict[str, Any] = field(default_factory=dict)
     expired: str = ""
     id_token: str = ""

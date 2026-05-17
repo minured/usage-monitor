@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     email TEXT NOT NULL DEFAULT '',
     source_file TEXT NOT NULL DEFAULT '',
     source_mtime_ns INTEGER NOT NULL DEFAULT 0,
+    source_created_at_utc TEXT,
     lifecycle_status TEXT NOT NULL,
     quota_status TEXT NOT NULL,
     plan_type TEXT NOT NULL DEFAULT '',
@@ -147,6 +148,7 @@ UPSERT_COLUMNS = [
     "email",
     "source_file",
     "source_mtime_ns",
+    "source_created_at_utc",
     "lifecycle_status",
     "quota_status",
     "plan_type",
@@ -174,6 +176,7 @@ CREATE TABLE {TABLE_NAME} (
     email TEXT NOT NULL DEFAULT '',
     source_file TEXT NOT NULL DEFAULT '',
     source_mtime_ns INTEGER NOT NULL DEFAULT 0,
+    source_created_at_utc TEXT,
     lifecycle_status TEXT NOT NULL,
     quota_status TEXT NOT NULL,
     plan_type TEXT NOT NULL DEFAULT '',
@@ -291,6 +294,8 @@ class UsageDatabase:
             conn.execute(
                 f"ALTER TABLE {TABLE_NAME} ADD COLUMN consecutive_401_count INTEGER NOT NULL DEFAULT 0"
             )
+        if "source_created_at_utc" not in existing_columns:
+            conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN source_created_at_utc TEXT")
         for column, definition in CPA_STATUS_COLUMN_DEFINITIONS.items():
             if column not in existing_columns:
                 conn.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN {column} {definition}")
@@ -1073,6 +1078,7 @@ class UsageDatabase:
                     invalid_reason_detail,
                     last_error_detail,
                     source_file,
+                    source_created_at_utc,
                     plan_type,
                     cpa_quota_status,
                     cpa_reset_at_utc,
