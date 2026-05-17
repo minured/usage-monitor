@@ -1055,7 +1055,8 @@ def _render_index_styles() -> str:
       align-items: center;
       box-sizing: border-box;
       gap: 9px;
-      width: 220px;
+      width: max-content;
+      max-width: min(320px, calc(100vw - 32px));
       margin-top: 4px;
       padding: 5px 9px;
       border: 1px solid rgba(215, 222, 232, 0.84);
@@ -1072,6 +1073,7 @@ def _render_index_styles() -> str:
     .trend-floating-tooltip[hidden] { display: none !important; }
     .trend-tooltip-pair {
       display: inline-flex;
+      flex: 0 0 auto;
       align-items: center;
       gap: 5px;
       min-width: 0;
@@ -3020,21 +3022,6 @@ def _render_index_script(
       return path;
     }}
 
-    function buildStepTrendPath(points) {{
-      if (!points.length) {{
-        return "";
-      }}
-      let path = `M ${{formatSvgNumber(points[0].x)}} ${{formatSvgNumber(points[0].y)}}`;
-      for (let index = 1; index < points.length; index += 1) {{
-        const previous = points[index - 1];
-        const point = points[index];
-        path += ` H ${{formatSvgNumber(point.x)}} V ${{formatSvgNumber(point.y)}}`;
-        if (previous.y === point.y) {{
-          continue;
-        }}
-      }}
-      return path;
-    }}
 
     function makeTrendPoint(point, x, y, series, slot) {{
       return {{
@@ -3128,7 +3115,7 @@ def _render_index_script(
       }}).join("");
 
       const historyPath = buildLinearTrendPath(historyChartPoints);
-      const recoveryPath = buildStepTrendPath(recoveryChartPoints);
+      const recoveryPath = buildLinearTrendPath(recoveryChartPoints);
       const nowLineX = recoveryChartPoints.length ? xForSlot(nowSlot) : null;
       svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
       svg.setAttribute("preserveAspectRatio", "none");
@@ -3196,7 +3183,7 @@ def _render_index_script(
         tooltipTime.textContent = formatCompactDateTimeText(point.capturedAt);
       }}
       if (tooltipLabel) {{
-        tooltipLabel.textContent = isRecovery ? "预计 exhausted" : "exhausted";
+        tooltipLabel.textContent = isRecovery ? "预计" : "exhausted";
       }}
       if (tooltipValue) {{
         tooltipValue.textContent = String(point.exhausted);
@@ -3211,7 +3198,7 @@ def _render_index_script(
       const canvasRect = canvas ? canvas.getBoundingClientRect() : svgRect;
       const canvasWidth = canvas ? canvas.clientWidth : svgRect.width;
       const relativeX = (svgRect.left - canvasRect.left) + (point.x / Math.max(geometry.width, 1)) * svgRect.width;
-      const halfWidth = 110;
+      const halfWidth = Math.ceil((tooltip.offsetWidth || 220) / 2);
       const clampedX = Math.max(halfWidth, Math.min(canvasWidth - halfWidth, relativeX));
       tooltip.style.left = `${{Math.round(clampedX)}}px`;
     }}
