@@ -300,13 +300,18 @@ def build_dashboard_payload(
     summary: dict[str, int] = {}
     rows: list[Any] = []
     exhausted_history: list[dict[str, Any]] = []
+    exhausted_recovery: list[dict[str, Any]] = []
+    cpa_stale_seconds = _cpa_dashboard_stale_seconds(settings)
     for _ in range(3):
         before_state = database.fetch_change_state()
         summary, rows = database.fetch_dashboard(
             current_filter,
-            cpa_stale_seconds=_cpa_dashboard_stale_seconds(settings),
+            cpa_stale_seconds=cpa_stale_seconds,
         )
         exhausted_history = database.fetch_exhausted_history()
+        exhausted_recovery = database.fetch_exhausted_recovery_projection(
+            cpa_stale_seconds=cpa_stale_seconds,
+        )
         after_state = database.fetch_change_state()
         accounts_revision = int(after_state["accounts_revision"])
         if accounts_revision == int(before_state["accounts_revision"]):
@@ -362,6 +367,7 @@ def build_dashboard_payload(
         "filter": current_filter,
         "summary": summary,
         "exhausted_history": exhausted_history,
+        "exhausted_recovery": exhausted_recovery,
         "items": items,
     }
 
@@ -378,6 +384,7 @@ def build_dashboard_overview_payload(
         "filter": dashboard_payload["filter"],
         "summary": dashboard_payload["summary"],
         "exhausted_history": dashboard_payload.get("exhausted_history") or [],
+        "exhausted_recovery": dashboard_payload.get("exhausted_recovery") or [],
     }
 
 
@@ -411,6 +418,7 @@ def build_dashboard_patch_payload(
         "filter": str(current_payload.get("filter") or ""),
         "summary": current_payload.get("summary") or {},
         "exhausted_history": current_payload.get("exhausted_history") or [],
+        "exhausted_recovery": current_payload.get("exhausted_recovery") or [],
         "upserted_items": upserted_items,
         "removed_dimension_keys": removed_dimension_keys,
     }
@@ -471,6 +479,7 @@ def _render_index_styles() -> str:
       --filter-active: #0f766e;
       --filter-available: #16a34a;
       --filter-exhausted: #f97316;
+      --trend-recovery: #2563eb;
       --filter-unknown: #64748b;
       --filter-invalid: #dc2626;
       --filter-missing: #b45309;
@@ -1016,6 +1025,18 @@ def _render_index_styles() -> str:
       stroke-linecap: round;
       stroke-linejoin: round;
     }
+    .trend-recovery-line {
+      fill: none;
+      stroke: var(--trend-recovery);
+      stroke-width: 2.4;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .trend-now-line {
+      stroke: rgba(83, 97, 115, 0.34);
+      stroke-width: 1;
+      stroke-dasharray: 3 5;
+    }
     .trend-hover-line {
       stroke: #9ca3af;
       stroke-width: 1;
@@ -1062,6 +1083,7 @@ def _render_index_styles() -> str:
       font-variant-numeric: tabular-nums;
     }
     .trend-tooltip-value.is-exhausted { color: var(--filter-exhausted); }
+    .trend-tooltip-value.is-recovery { color: var(--trend-recovery); }
     .trend-tooltip-divider {
       width: 1px;
       height: 12px;
@@ -1647,17 +1669,17 @@ def _render_index_header() -> str:
           <button id="summary-trend-toggle" type="button" class="summary-trend-toggle" aria-controls="summary-trend-panel" aria-expanded="true">隐藏趋势</button>
         </div>
         <section id="summary" class="summary" aria-label="账号汇总"></section>
-        <section id="summary-trend-panel" class="summary-trend" aria-label="exhausted 数量趋势">
+        <section id="summary-trend-panel" class="summary-trend" aria-label="exhausted 数量与恢复趋势">
           <div class="summary-trend-meta">
             <span>exhausted trend</span>
             <span><strong id="exhausted-trend-current">-</strong> <span id="exhausted-trend-time">-</span></span>
           </div>
           <div id="exhausted-trend-canvas" class="summary-trend-canvas">
-            <svg id="exhausted-trend-chart" class="trend-chart" viewBox="0 0 640 160" preserveAspectRatio="none" role="img" aria-label="exhausted 数量趋势"></svg>
+            <svg id="exhausted-trend-chart" class="trend-chart" viewBox="0 0 640 160" preserveAspectRatio="none" role="img" aria-label="exhausted 数量与恢复趋势"></svg>
             <div id="exhausted-trend-tooltip" class="trend-floating-tooltip" hidden aria-hidden="true">
               <span class="trend-tooltip-pair"><span class="trend-tooltip-label">时间</span><span id="exhausted-trend-tooltip-time" class="trend-tooltip-value">-</span></span>
               <span class="trend-tooltip-divider"></span>
-              <span class="trend-tooltip-pair"><span class="trend-tooltip-label">exhausted</span><span id="exhausted-trend-tooltip-value" class="trend-tooltip-value is-exhausted">-</span></span>
+              <span class="trend-tooltip-pair"><span id="exhausted-trend-tooltip-label" class="trend-tooltip-label">exhausted</span><span id="exhausted-trend-tooltip-value" class="trend-tooltip-value is-exhausted">-</span></span>
             </div>
             <div id="exhausted-trend-empty" class="trend-empty" hidden>等待更多变化</div>
           </div>
@@ -1760,6 +1782,7 @@ def _render_index_script(
       items: Array.isArray(initialDashboardPayload.items) ? initialDashboardPayload.items : [],
       summary: {{}},
       exhaustedHistory: Array.isArray(initialDashboardPayload.exhausted_history) ? initialDashboardPayload.exhausted_history : [],
+      exhaustedRecovery: Array.isArray(initialDashboardPayload.exhausted_recovery) ? initialDashboardPayload.exhausted_recovery : [],
       summaryTrendVisible: true,
       dashboardRevision: Number(initialDashboardPayload.accounts_revision || 0),
       nextRoundAtUtc: String(initialProgressPayload.next_round_at_utc || ""),
@@ -2480,7 +2503,7 @@ def _render_index_script(
         state.summary = payload.summary || {{}};
         renderStickyQuickFilters(state.summary);
       }}
-      updateExhaustedHistory(payload.exhausted_history);
+      updateExhaustedHistory(payload.exhausted_history, payload.exhausted_recovery);
       updateGeneratedAt(payload.generated_at || "");
       showError("");
       setDashboardBusy(false);
@@ -2507,7 +2530,7 @@ def _render_index_script(
       if (!areSummaryEqual(nextSummary, state.summary || {{}})) {{
         renderSummary(nextSummary);
       }}
-      updateExhaustedHistory(payload.exhausted_history);
+      updateExhaustedHistory(payload.exhausted_history, payload.exhausted_recovery);
 
       const upsertedItems = Array.isArray(payload.upserted_items) ? payload.upserted_items : [];
       const removedDimensionKeys = Array.isArray(payload.removed_dimension_keys) ? payload.removed_dimension_keys : [];
@@ -2951,6 +2974,30 @@ def _render_index_script(
         .sort((left, right) => left.millis - right.millis);
     }}
 
+    function normalizeExhaustedRecovery(recovery) {{
+      if (!Array.isArray(recovery)) {{
+        return [];
+      }}
+      return recovery
+        .map((point) => {{
+          const projectedAt = String((point && (point.projected_at_utc || point.projected_at || point.captured_at_utc)) || "").trim();
+          const millis = parseUtcMillis(projectedAt);
+          const exhausted = Number((point && point.exhausted) || 0);
+          const recovered = Number((point && point.recovered) || 0);
+          if (millis === null || !Number.isFinite(exhausted)) {{
+            return null;
+          }}
+          return {{
+            capturedAt: projectedAt,
+            millis,
+            exhausted: Math.max(0, Math.round(exhausted)),
+            recovered: Number.isFinite(recovered) ? Math.max(0, Math.round(recovered)) : 0
+          }};
+        }})
+        .filter(Boolean)
+        .sort((left, right) => left.millis - right.millis);
+    }}
+
     function getNiceTrendMax(value) {{
       const maxValue = Math.max(1, Math.ceil(Number(value) || 1));
       const step = maxValue <= 5 ? 1 : maxValue <= 20 ? 5 : maxValue <= 50 ? 10 : 25;
@@ -2959,7 +3006,7 @@ def _render_index_script(
 
     function formatSvgNumber(value) {{
       const text = Number(value).toFixed(2);
-      return text.replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+      return text.replace(/\\.00$/, "").replace(/(\\.\\d)0$/, "$1");
     }}
 
     function buildLinearTrendPath(points) {{
@@ -2973,7 +3020,33 @@ def _render_index_script(
       return path;
     }}
 
-    function renderExhaustedTrend(history = state.exhaustedHistory) {{
+    function buildStepTrendPath(points) {{
+      if (!points.length) {{
+        return "";
+      }}
+      let path = `M ${{formatSvgNumber(points[0].x)}} ${{formatSvgNumber(points[0].y)}}`;
+      for (let index = 1; index < points.length; index += 1) {{
+        const previous = points[index - 1];
+        const point = points[index];
+        path += ` H ${{formatSvgNumber(point.x)}} V ${{formatSvgNumber(point.y)}}`;
+        if (previous.y === point.y) {{
+          continue;
+        }}
+      }}
+      return path;
+    }}
+
+    function makeTrendPoint(point, x, y, series, slot) {{
+      return {{
+        ...point,
+        x,
+        y,
+        series,
+        slot
+      }};
+    }}
+
+    function renderExhaustedTrend(history = state.exhaustedHistory, recovery = state.exhaustedRecovery) {{
       const svg = document.getElementById("exhausted-trend-chart");
       const empty = document.getElementById("exhausted-trend-empty");
       const current = document.getElementById("exhausted-trend-current");
@@ -2982,38 +3055,67 @@ def _render_index_script(
         return;
       }}
 
-      const points = normalizeExhaustedHistory(history);
-      const latest = points[points.length - 1] || null;
+      const historyPoints = normalizeExhaustedHistory(history);
+      const recoveryPoints = normalizeExhaustedRecovery(recovery);
+      const nowPoint = recoveryPoints[0] || historyPoints[historyPoints.length - 1] || null;
+      const currentPoint = nowPoint || null;
       if (current) {{
-        current.textContent = latest ? String(latest.exhausted) : "-";
+        current.textContent = currentPoint ? String(currentPoint.exhausted) : "-";
       }}
       if (time) {{
-        time.textContent = latest ? formatCompactDateTimeText(latest.capturedAt) : "-";
+        time.textContent = currentPoint ? formatCompactDateTimeText(currentPoint.capturedAt) : "-";
       }}
+
+      const totalSlots = Math.max(1, historyPoints.length + recoveryPoints.length);
       if (empty) {{
-        empty.hidden = points.length >= 2;
-        empty.textContent = points.length === 0 ? "暂无趋势数据" : "等待更多变化";
+        empty.hidden = totalSlots >= 2;
+        empty.textContent = totalSlots <= 1 ? "暂无趋势数据" : "等待更多变化";
       }}
 
       const measuredWidth = Math.round(svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 640);
       const width = Math.max(360, measuredWidth);
       const height = 160;
-      const pad = {{ left: 10, right: 10, top: 14, bottom: 26 }};
+      const pad = {{ left: 14, right: 14, top: 14, bottom: 26 }};
       const plotWidth = width - pad.left - pad.right;
       const plotHeight = height - pad.top - pad.bottom;
       const bottom = pad.top + plotHeight;
-      const maxY = getNiceTrendMax(Math.max(...points.map((point) => point.exhausted), 1));
-      const chartPoints = points.map((point, index) => ({{
-        ...point,
-        x: points.length <= 1
-          ? pad.left + plotWidth / 2
-          : pad.left + (index / (points.length - 1)) * plotWidth,
-        y: bottom - (point.exhausted / maxY) * plotHeight
-      }}));
+      const allValues = [...historyPoints, ...recoveryPoints].map((point) => point.exhausted);
+      const maxY = getNiceTrendMax(Math.max(...allValues, 1));
+      const xForSlot = (slot) => totalSlots <= 1
+        ? pad.left + plotWidth / 2
+        : pad.left + (slot / (totalSlots - 1)) * plotWidth;
+      const yForValue = (value) => bottom - (value / maxY) * plotHeight;
+      const historyChartPoints = historyPoints.map((point, index) => (
+        makeTrendPoint(point, xForSlot(index), yForValue(point.exhausted), "history", index)
+      ));
+      const nowSlot = historyPoints.length;
+      if (recoveryPoints.length && nowPoint) {{
+        historyChartPoints.push(
+          makeTrendPoint(nowPoint, xForSlot(nowSlot), yForValue(nowPoint.exhausted), "history", nowSlot)
+        );
+      }}
+      const recoveryChartPoints = recoveryPoints.map((point, index) => {{
+        const slot = nowSlot + index;
+        return makeTrendPoint(point, xForSlot(slot), yForValue(point.exhausted), "recovery", slot);
+      }});
+      const hoverPoints = new Array(totalSlots).fill(null);
+      historyPoints.forEach((point, index) => {{
+        hoverPoints[index] = makeTrendPoint(point, xForSlot(index), yForValue(point.exhausted), "history", index);
+      }});
+      recoveryChartPoints.forEach((point) => {{
+        hoverPoints[point.slot] = point;
+      }});
 
-      const labelPoints = chartPoints.length >= 2
-        ? [chartPoints[0], chartPoints[Math.floor((chartPoints.length - 1) / 2)], chartPoints[chartPoints.length - 1]]
-        : chartPoints;
+      const labelPoints = [];
+      if (historyChartPoints.length) {{
+        labelPoints.push(historyChartPoints[0]);
+      }}
+      if (recoveryChartPoints.length) {{
+        labelPoints.push(recoveryChartPoints[0]);
+        labelPoints.push(recoveryChartPoints[recoveryChartPoints.length - 1]);
+      }} else if (historyChartPoints.length > 1) {{
+        labelPoints.push(historyChartPoints[historyChartPoints.length - 1]);
+      }}
       const usedLabelKeys = new Set();
       const xLabelHtml = labelPoints.map((point) => {{
         const key = `${{Math.round(point.x)}}-${{point.capturedAt}}`;
@@ -3021,21 +3123,25 @@ def _render_index_script(
           return "";
         }}
         usedLabelKeys.add(key);
-        const anchor = point.x < 40 ? "start" : point.x > width - 40 ? "end" : "middle";
+        const anchor = point.x < 44 ? "start" : point.x > width - 44 ? "end" : "middle";
         return `<text class="trend-axis-label" x="${{formatSvgNumber(point.x)}}" y="${{height - 7}}" text-anchor="${{anchor}}">${{escapeHtml(formatCompactDateTimeText(point.capturedAt))}}</text>`;
       }}).join("");
 
-      const linePath = buildLinearTrendPath(chartPoints);
+      const historyPath = buildLinearTrendPath(historyChartPoints);
+      const recoveryPath = buildStepTrendPath(recoveryChartPoints);
+      const nowLineX = recoveryChartPoints.length ? xForSlot(nowSlot) : null;
       svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
       svg.setAttribute("preserveAspectRatio", "none");
       svg.innerHTML = `
         <rect id="exhausted-trend-hit-layer" class="trend-hit-layer" x="0" y="0" width="${{width}}" height="${{height}}"></rect>
-        ${{linePath ? `<path class="trend-line" d="${{linePath}}"></path>` : ""}}
+        ${{nowLineX === null ? "" : `<line class="trend-now-line" x1="${{formatSvgNumber(nowLineX)}}" y1="${{pad.top}}" x2="${{formatSvgNumber(nowLineX)}}" y2="${{bottom}}"></line>`}}
+        ${{historyPath ? `<path class="trend-line" d="${{historyPath}}"></path>` : ""}}
+        ${{recoveryPath ? `<path class="trend-recovery-line" d="${{recoveryPath}}"></path>` : ""}}
         ${{xLabelHtml}}
         <g id="exhausted-trend-hover" hidden></g>
       `;
       clearExhaustedTrendHover({{ restoreLatest: false }});
-      bindExhaustedTrendHover(svg, chartPoints, {{ width, height, pad, bottom }});
+      bindExhaustedTrendHover(svg, hoverPoints, {{ width, height, pad, bottom }});
     }}
 
     function setExhaustedTrendMeta(point) {{
@@ -3049,9 +3155,13 @@ def _render_index_script(
       }}
     }}
 
-    function getLatestExhaustedTrendPoint() {{
-      const points = normalizeExhaustedHistory(state.exhaustedHistory);
-      return points[points.length - 1] || null;
+    function getCurrentExhaustedTrendPoint() {{
+      const recoveryPoints = normalizeExhaustedRecovery(state.exhaustedRecovery);
+      if (recoveryPoints.length) {{
+        return recoveryPoints[0];
+      }}
+      const historyPoints = normalizeExhaustedHistory(state.exhaustedHistory);
+      return historyPoints[historyPoints.length - 1] || null;
     }}
 
     function clearExhaustedTrendHover(options = {{}}) {{
@@ -3069,22 +3179,29 @@ def _render_index_script(
         tooltip.style.left = "";
       }}
       if (restoreLatest) {{
-        setExhaustedTrendMeta(getLatestExhaustedTrendPoint());
+        setExhaustedTrendMeta(getCurrentExhaustedTrendPoint());
       }}
     }}
 
     function positionExhaustedTrendTooltip(svg, point, geometry) {{
       const tooltip = document.getElementById("exhausted-trend-tooltip");
       const tooltipTime = document.getElementById("exhausted-trend-tooltip-time");
+      const tooltipLabel = document.getElementById("exhausted-trend-tooltip-label");
       const tooltipValue = document.getElementById("exhausted-trend-tooltip-value");
       if (!tooltip || !point) {{
         return;
       }}
+      const isRecovery = point.series === "recovery";
       if (tooltipTime) {{
         tooltipTime.textContent = formatCompactDateTimeText(point.capturedAt);
       }}
+      if (tooltipLabel) {{
+        tooltipLabel.textContent = isRecovery ? "预计 exhausted" : "exhausted";
+      }}
       if (tooltipValue) {{
         tooltipValue.textContent = String(point.exhausted);
+        tooltipValue.classList.toggle("is-recovery", isRecovery);
+        tooltipValue.classList.toggle("is-exhausted", !isRecovery);
       }}
       tooltip.hidden = false;
       tooltip.setAttribute("aria-hidden", "false");
@@ -3112,7 +3229,7 @@ def _render_index_script(
       positionExhaustedTrendTooltip(svg, point, geometry);
     }}
 
-    function bindExhaustedTrendHover(svg, chartPoints, geometry) {{
+    function bindExhaustedTrendHover(svg, hoverPoints, geometry) {{
       const hitLayer = svg.querySelector("#exhausted-trend-hit-layer");
       const hover = svg.querySelector("#exhausted-trend-hover");
       const canvas = document.getElementById("exhausted-trend-canvas") || svg.closest(".summary-trend-canvas");
@@ -3123,7 +3240,7 @@ def _render_index_script(
         canvas.onpointerleave = null;
         canvas.onpointercancel = null;
       }}
-      if (!hitLayer || !hover || !chartPoints.length) {{
+      if (!hitLayer || !hover || !Array.isArray(hoverPoints) || hoverPoints.length === 0) {{
         clearExhaustedTrendHover({{ restoreLatest: false }});
         return;
       }}
@@ -3134,9 +3251,12 @@ def _render_index_script(
         const ratio = geometry.width / Math.max(rect.width, 1);
         const cursorX = Math.max(geometry.pad.left, Math.min(geometry.width - geometry.pad.right, (event.clientX - rect.left) * ratio));
         const plotWidth = Math.max(geometry.width - geometry.pad.left - geometry.pad.right, 1);
-        const rawIndex = Math.round(((cursorX - geometry.pad.left) / plotWidth) * (chartPoints.length - 1));
-        const index = Math.max(0, Math.min(chartPoints.length - 1, rawIndex));
-        renderTrendHover(svg, chartPoints[index], geometry);
+        const rawSlot = Math.round(((cursorX - geometry.pad.left) / plotWidth) * (hoverPoints.length - 1));
+        const slot = Math.max(0, Math.min(hoverPoints.length - 1, rawSlot));
+        const point = hoverPoints[slot];
+        if (point) {{
+          renderTrendHover(svg, point, geometry);
+        }}
       }};
       svg.onpointerleave = clearHover;
       svg.onpointercancel = clearHover;
@@ -3146,9 +3266,12 @@ def _render_index_script(
       }}
     }}
 
-    function updateExhaustedHistory(history) {{
+    function updateExhaustedHistory(history, recovery) {{
       if (Array.isArray(history)) {{
         state.exhaustedHistory = history;
+      }}
+      if (Array.isArray(recovery)) {{
+        state.exhaustedRecovery = recovery;
       }}
       renderExhaustedTrend();
     }}

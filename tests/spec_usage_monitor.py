@@ -208,6 +208,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         *,
         checked_at: str,
         lifecycle_status: str = LIFECYCLE_ACTIVE,
+        reset_at_utc: str | None = "2026-03-18T01:00:00Z",
     ) -> dict:
         return {
             "account_id": account_id,
@@ -220,7 +221,7 @@ class UsageMonitorTestCase(unittest.TestCase):
             "used_percent": 100.0 if quota_status == QUOTA_EXHAUSTED else 10.0,
             "rate_limit_allowed": 0 if quota_status == QUOTA_EXHAUSTED else 1,
             "rate_limit_reached": 1 if quota_status == QUOTA_EXHAUSTED else 0,
-            "reset_at_utc": "2026-03-18T01:00:00Z",
+            "reset_at_utc": reset_at_utc,
             "last_checked_at_utc": checked_at,
             "last_success_at_utc": checked_at,
             "last_http_status": 200,
@@ -742,7 +743,52 @@ class UsageMonitorTestCase(unittest.TestCase):
         overview_payload = build_dashboard_overview_payload(self.settings, "all", database)
         self.assertEqual(len(payload["exhausted_history"]), 168)
         self.assertEqual(payload["exhausted_history"][-1]["exhausted"], 0)
+        self.assertEqual(len(payload["exhausted_recovery"]), 169)
         self.assertEqual(overview_payload["exhausted_history"], payload["exhausted_history"])
+        self.assertEqual(overview_payload["exhausted_recovery"], payload["exhausted_recovery"])
+
+    def test_exhausted_recovery_projection_uses_current_window_only(self) -> None:
+        database = UsageDatabase(self.settings.db_path)
+        database.initialize()
+        for account_id, reset_at in (
+            ("recover-soon", "2026-03-18T04:00:00Z"),
+            ("recover-later", "2026-03-18T05:45:00Z"),
+            ("recover-outside", "2026-03-18T08:00:00Z"),
+            ("recover-unknown", None),
+        ):
+            database.upsert_account(
+                self._account_payload(
+                    account_id,
+                    QUOTA_EXHAUSTED,
+                    checked_at="2026-03-18T03:30:00Z",
+                    reset_at_utc=reset_at,
+                )
+            )
+        database.upsert_account(
+            self._account_payload(
+                "available-ignored",
+                QUOTA_AVAILABLE,
+                checked_at="2026-03-18T03:30:00Z",
+                reset_at_utc="2026-03-18T04:00:00Z",
+            )
+        )
+
+        projection = database.fetch_exhausted_recovery_projection(
+            hours=3,
+            now_utc="2026-03-18T03:45:00Z",
+        )
+
+        self.assertEqual(
+            [point["projected_at_utc"] for point in projection],
+            [
+                "2026-03-18T03:45:00Z",
+                "2026-03-18T04:45:00Z",
+                "2026-03-18T05:45:00Z",
+                "2026-03-18T06:45:00Z",
+            ],
+        )
+        self.assertEqual([point["exhausted"] for point in projection], [4, 3, 2, 2])
+        self.assertEqual([point["recovered"] for point in projection], [0, 1, 2, 2])
 
     def test_cpa_auth_file_status_parser_handles_usage_limit(self) -> None:
         status = parse_auth_file_status(
@@ -2228,7 +2274,9 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertIn("getPlanTypePriority(right.plan_type)", body)
         self.assertIn("function formatCompactDateTimeText(value) {", body)
         self.assertIn("function buildLinearTrendPath(points) {", body)
-        self.assertIn("const linePath = buildLinearTrendPath(chartPoints);", body)
+        self.assertIn("function buildStepTrendPath(points) {", body)
+        self.assertIn("const historyPath = buildLinearTrendPath(historyChartPoints);", body)
+        self.assertIn("const recoveryPath = buildStepTrendPath(recoveryChartPoints);", body)
         self.assertNotIn("function buildSmoothTrendPath(points) {", body)
         self.assertIn("function syncStickyHeaderLayout()", body)
         self.assertIn("function updateStickyHeaderVisibility()", body)

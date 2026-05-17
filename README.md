@@ -238,8 +238,9 @@ Compose 行为：
 - `GET /`
   - 返回运维页面
 - `GET /api/dashboard?filter=all|active|available|exhausted|unknown|invalid|source_missing`
-  - 返回总览、列表 JSON，以及 `exhausted_history` 趋势点
+  - 返回总览、列表 JSON，以及 `exhausted_history` / `exhausted_recovery` 趋势点
   - `exhausted_history` 固定返回最近 7 天的 168 个小时点；无变化的小时沿用上一条 exhausted 数量
+  - `exhausted_recovery` 固定返回从当前时间起未来 7 天的 169 个小时点；只根据当前 exhausted 账号在窗口内的重置时间预测恢复
   - Web 进程内会按 `accounts_revision` 复用已编码响应，账号数据变化后立即失效
 - `GET /api/progress`
   - 返回当前采集轮次进度 JSON，供调试或外部调用使用

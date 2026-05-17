@@ -935,6 +935,63 @@ class UsageDatabase:
             )
         return points
 
+    def fetch_exhausted_recovery_projection(
+        self,
+        hours: int = SUMMARY_HISTORY_HOURS,
+        *,
+        now_utc: str | None = None,
+        cpa_stale_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """按当前 exhausted 账号的重置时间生成未来额度恢复曲线。"""
+        try:
+            safe_hours = int(hours)
+        except (TypeError, ValueError):
+            safe_hours = SUMMARY_HISTORY_HOURS
+        safe_hours = max(1, min(safe_hours, 1000))
+
+        parsed_now = parse_utc(now_utc) if now_utc else None
+        window_start_at = parsed_now or utc_now()
+        window_end_at = window_start_at + timedelta(hours=safe_hours)
+        effective_sql, effective_params = self._effective_accounts_sql(cpa_stale_seconds)
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                WITH effective_accounts AS ({effective_sql})
+                SELECT effective_reset_at_utc
+                FROM effective_accounts
+                WHERE lifecycle_status = ? AND effective_quota_status = ?
+                """,
+                (*effective_params, LIFECYCLE_ACTIVE, QUOTA_EXHAUSTED),
+            ).fetchall()
+
+        reset_events: list[Any] = []
+        for row in rows:
+            reset_at = parse_utc(str(row["effective_reset_at_utc"] or ""))
+            if reset_at is None:
+                continue
+            if window_start_at < reset_at <= window_end_at:
+                reset_events.append(reset_at)
+        reset_events.sort()
+
+        current_exhausted = len(rows)
+        points: list[dict[str, Any]] = []
+        event_index = 0
+        recovered = 0
+        for offset in range(safe_hours + 1):
+            projected_at = window_start_at + timedelta(hours=offset)
+            while event_index < len(reset_events) and reset_events[event_index] <= projected_at:
+                recovered += 1
+                event_index += 1
+            points.append(
+                {
+                    "projected_at_utc": format_utc(projected_at),
+                    "exhausted": max(0, current_exhausted - recovered),
+                    "recovered": recovered,
+                }
+            )
+        return points
+
     def fetch_dashboard(
         self,
         filter_name: str = "all",
