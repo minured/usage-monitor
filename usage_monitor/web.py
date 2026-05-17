@@ -3202,10 +3202,10 @@ def _render_index_script(
         time.textContent = currentPoint ? formatCompactDateTimeText(currentPoint.capturedAt) : "-";
       }}
 
-      const totalSlots = Math.max(1, historyPoints.length + recoveryPoints.length);
+      const totalPoints = historyPoints.length + recoveryPoints.length;
       if (empty) {{
-        empty.hidden = totalSlots >= 2;
-        empty.textContent = totalSlots <= 1 ? "暂无趋势数据" : "等待更多变化";
+        empty.hidden = totalPoints >= 2;
+        empty.textContent = totalPoints <= 1 ? "暂无趋势数据" : "等待更多变化";
       }}
 
       const measuredWidth = Math.round(svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 640);
@@ -3217,30 +3217,32 @@ def _render_index_script(
       const bottom = pad.top + plotHeight;
       const allValues = [...historyPoints, ...recoveryPoints].map((point) => point.exhausted);
       const maxY = getNiceTrendMax(Math.max(...allValues, 1));
-      const xForSlot = (slot) => totalSlots <= 1
-        ? pad.left + plotWidth / 2
-        : pad.left + (slot / (totalSlots - 1)) * plotWidth;
+      const chartStartMillis = historyPoints[0]?.millis ?? recoveryPoints[0]?.millis ?? 0;
+      const chartEndMillis = recoveryPoints[recoveryPoints.length - 1]?.millis
+        ?? historyPoints[historyPoints.length - 1]?.millis
+        ?? chartStartMillis;
+      const xForMillis = (millis) => {{
+        if (!Number.isFinite(millis) || chartEndMillis <= chartStartMillis) {{
+          return pad.left + plotWidth / 2;
+        }}
+        const ratio = (millis - chartStartMillis) / (chartEndMillis - chartStartMillis);
+        return pad.left + Math.max(0, Math.min(1, ratio)) * plotWidth;
+      }};
       const yForValue = (value) => bottom - (value / maxY) * plotHeight;
       const historyChartPoints = historyPoints.map((point, index) => (
-        makeTrendPoint(point, xForSlot(index), yForValue(point.exhausted), "history", index)
+        makeTrendPoint(point, xForMillis(point.millis), yForValue(point.exhausted), "history", index)
       ));
-      const nowSlot = historyPoints.length;
       if (recoveryPoints.length && nowPoint) {{
         historyChartPoints.push(
-          makeTrendPoint(nowPoint, xForSlot(nowSlot), yForValue(nowPoint.exhausted), "history", nowSlot)
+          makeTrendPoint(nowPoint, xForMillis(nowPoint.millis), yForValue(nowPoint.exhausted), "history", historyChartPoints.length)
         );
       }}
-      const recoveryChartPoints = recoveryPoints.map((point, index) => {{
-        const slot = nowSlot + index;
-        return makeTrendPoint(point, xForSlot(slot), yForValue(point.exhausted), "recovery", slot);
-      }});
-      const hoverPoints = new Array(totalSlots).fill(null);
-      historyPoints.forEach((point, index) => {{
-        hoverPoints[index] = makeTrendPoint(point, xForSlot(index), yForValue(point.exhausted), "history", index);
-      }});
-      recoveryChartPoints.forEach((point) => {{
-        hoverPoints[point.slot] = point;
-      }});
+      const recoveryChartPoints = recoveryPoints.map((point, index) => (
+        makeTrendPoint(point, xForMillis(point.millis), yForValue(point.exhausted), "recovery", historyChartPoints.length + index)
+      ));
+      const hoverPoints = [...historyChartPoints, ...recoveryChartPoints]
+        .filter((point) => Number.isFinite(point.x))
+        .sort((left, right) => left.x - right.x);
 
       const labelPoints = [];
       if (historyChartPoints.length) {{
@@ -3265,7 +3267,7 @@ def _render_index_script(
 
       const historyPath = buildLinearTrendPath(historyChartPoints);
       const recoveryPath = buildLinearTrendPath(recoveryChartPoints);
-      const nowLineX = recoveryChartPoints.length ? xForSlot(nowSlot) : null;
+      const nowLineX = recoveryChartPoints.length ? recoveryChartPoints[0].x : null;
       svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
       svg.setAttribute("preserveAspectRatio", "none");
       svg.innerHTML = `
@@ -3386,13 +3388,17 @@ def _render_index_script(
         const rect = svg.getBoundingClientRect();
         const ratio = geometry.width / Math.max(rect.width, 1);
         const cursorX = Math.max(geometry.pad.left, Math.min(geometry.width - geometry.pad.right, (event.clientX - rect.left) * ratio));
-        const plotWidth = Math.max(geometry.width - geometry.pad.left - geometry.pad.right, 1);
-        const rawSlot = Math.round(((cursorX - geometry.pad.left) / plotWidth) * (hoverPoints.length - 1));
-        const slot = Math.max(0, Math.min(hoverPoints.length - 1, rawSlot));
-        const point = hoverPoints[slot];
-        if (point) {{
-          renderTrendHover(svg, point, geometry);
+        let point = hoverPoints[0];
+        let bestDistance = Math.abs(cursorX - point.x);
+        for (let index = 1; index < hoverPoints.length; index += 1) {{
+          const candidate = hoverPoints[index];
+          const distance = Math.abs(cursorX - candidate.x);
+          if (distance <= bestDistance) {{
+            point = candidate;
+            bestDistance = distance;
+          }}
         }}
+        renderTrendHover(svg, point, geometry);
       }};
       svg.onpointerleave = clearHover;
       svg.onpointercancel = clearHover;

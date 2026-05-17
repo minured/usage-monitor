@@ -240,8 +240,8 @@ Compose 行为：
 - `GET /api/dashboard?filter=all|active|available|exhausted|unknown|invalid|source_missing`
   - 返回总览、列表 JSON，以及 `exhausted_history` / `exhausted_recovery` 趋势点
   - `exhausted_history` 固定返回最近 7 天的 168 个小时点；无变化的小时沿用上一条 exhausted 数量
-  - `exhausted_recovery` 固定返回从当前时间起未来 7 天的 169 个小时点；只根据当前 exhausted 账号在窗口内的重置时间预测恢复
-  - Web 进程内会按 `accounts_revision` 复用已编码响应，账号数据变化后立即失效
+  - `exhausted_recovery` 返回从当前分钟起未来 7 天的恢复趋势：首点为当前分钟，末点为 7 天后的同一分钟，中间按当前 exhausted 账号的实际 reset 分钟聚合
+  - Web 进程内会按 `accounts_revision` 与分钟级图表窗口复用已编码响应，账号数据变化或分钟窗口变化后失效
 - `GET /api/progress`
   - 返回当前采集轮次进度 JSON，供调试或外部调用使用
   - Web 进程内会按 `runtime_revision` 复用已编码响应，运行态变化后立即失效

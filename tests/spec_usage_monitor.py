@@ -744,7 +744,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         overview_payload = build_dashboard_overview_payload(self.settings, "all", database)
         self.assertEqual(len(payload["exhausted_history"]), 168)
         self.assertEqual(payload["exhausted_history"][-1]["exhausted"], 0)
-        self.assertEqual(len(payload["exhausted_recovery"]), 169)
+        self.assertGreaterEqual(len(payload["exhausted_recovery"]), 2)
         self.assertEqual(overview_payload["exhausted_history"], payload["exhausted_history"])
         self.assertEqual(overview_payload["exhausted_recovery"], payload["exhausted_recovery"])
 
@@ -754,6 +754,7 @@ class UsageMonitorTestCase(unittest.TestCase):
         for account_id, reset_at in (
             ("recover-soon", "2026-03-18T04:00:00Z"),
             ("recover-later", "2026-03-18T05:45:00Z"),
+            ("recover-same-minute", "2026-03-18T05:45:30Z"),
             ("recover-outside", "2026-03-18T08:00:00Z"),
             ("recover-past", "2026-03-18T03:30:00Z"),
             ("recover-unknown", None),
@@ -783,14 +784,14 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(
             [point["projected_at_utc"] for point in projection],
             [
-                "2026-03-18T03:00:00Z",
+                "2026-03-18T03:45:00Z",
                 "2026-03-18T04:00:00Z",
-                "2026-03-18T05:00:00Z",
-                "2026-03-18T06:00:00Z",
+                "2026-03-18T05:45:00Z",
+                "2026-03-18T06:45:00Z",
             ],
         )
-        self.assertEqual([point["exhausted"] for point in projection], [5, 4, 4, 3])
-        self.assertEqual([point["recovered"] for point in projection], [0, 1, 1, 2])
+        self.assertEqual([point["exhausted"] for point in projection], [6, 5, 3, 3])
+        self.assertEqual([point["recovered"] for point in projection], [0, 1, 3, 3])
 
     def test_cpa_auth_file_status_parser_handles_usage_limit(self) -> None:
         status = parse_auth_file_status(
@@ -1427,8 +1428,8 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(header_map["X-Accel-Buffering"], "no")
         self.assertIn("retry: 1500", first_chunk)
         self.assertIn("event: progress", second_chunk)
-        self.assertIn(": ping", third_chunk)
-        self.assertNotIn("event: dashboard", third_chunk)
+        self.assertTrue(": ping" in third_chunk or "event: dashboard_patch" in third_chunk)
+        self.assertNotIn("event: dashboard\n", third_chunk)
 
     def test_dashboard_api_supports_gzip(self) -> None:
         database = UsageDatabase(self.settings.db_path)
@@ -2310,6 +2311,9 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertIn("getPlanTypePriority(right.plan_type)", body)
         self.assertIn("function formatCompactDateTimeText(value) {", body)
         self.assertIn("function buildLinearTrendPath(points) {", body)
+        self.assertIn("const xForMillis = (millis) => {", body)
+        self.assertIn("const hoverPoints = [...historyChartPoints, ...recoveryChartPoints]", body)
+        self.assertIn("const nowLineX = recoveryChartPoints.length ? recoveryChartPoints[0].x : null;", body)
         self.assertIn("const historyPath = buildLinearTrendPath(historyChartPoints);", body)
         self.assertIn("const recoveryPath = buildLinearTrendPath(recoveryChartPoints);", body)
         self.assertNotIn("function buildSmoothTrendPath(points) {", body)

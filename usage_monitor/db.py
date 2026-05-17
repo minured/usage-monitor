@@ -951,9 +951,9 @@ class UsageDatabase:
 
         parsed_now = parse_utc(now_utc) if now_utc else None
         actual_start_at = parsed_now or utc_now()
-        # 图表历史段按小时桶展示；未来恢复段也对齐到当前小时整点，
-        # 保持横轴端点一致，避免出现 17:07 这类非整点标签。
-        window_start_at = actual_start_at.replace(minute=0, second=0, microsecond=0)
+        # 历史段保留小时桶；未来段从当前真实分钟开始，按账号实际 reset
+        # 分钟落点，保证“现在”竖线与恢复事件都能随 SSE 按分钟推进。
+        window_start_at = actual_start_at.replace(second=0, microsecond=0)
         window_end_at = window_start_at + timedelta(hours=safe_hours)
         effective_sql, effective_params = self._effective_accounts_sql(cpa_stale_seconds)
 
@@ -968,28 +968,38 @@ class UsageDatabase:
                 (*effective_params, LIFECYCLE_ACTIVE, QUOTA_EXHAUSTED),
             ).fetchall()
 
-        reset_events: list[Any] = []
+        reset_counts_by_minute: dict[Any, int] = {}
         for row in rows:
             reset_at = parse_utc(str(row["effective_reset_at_utc"] or ""))
             if reset_at is None:
                 continue
-            # 当前时刻以前已经到期但仍处于 exhausted 的账号，不能被当作未来恢复。
-            if actual_start_at < reset_at <= window_end_at:
-                reset_events.append(reset_at)
-        reset_events.sort()
+            # 当前分钟以前已经到期但仍处于 exhausted 的账号，不能被当作未来恢复。
+            reset_minute_at = reset_at.replace(second=0, microsecond=0)
+            if window_start_at < reset_minute_at <= window_end_at:
+                reset_counts_by_minute[reset_minute_at] = reset_counts_by_minute.get(reset_minute_at, 0) + 1
 
         current_exhausted = len(rows)
-        points: list[dict[str, Any]] = []
-        event_index = 0
+        points: list[dict[str, Any]] = [
+            {
+                "projected_at_utc": format_utc(window_start_at),
+                "exhausted": current_exhausted,
+                "recovered": 0,
+            }
+        ]
         recovered = 0
-        for offset in range(safe_hours + 1):
-            projected_at = window_start_at + timedelta(hours=offset)
-            while event_index < len(reset_events) and reset_events[event_index] <= projected_at:
-                recovered += 1
-                event_index += 1
+        for projected_at in sorted(reset_counts_by_minute):
+            recovered += reset_counts_by_minute[projected_at]
             points.append(
                 {
                     "projected_at_utc": format_utc(projected_at),
+                    "exhausted": max(0, current_exhausted - recovered),
+                    "recovered": recovered,
+                }
+            )
+        if points[-1]["projected_at_utc"] != format_utc(window_end_at):
+            points.append(
+                {
+                    "projected_at_utc": format_utc(window_end_at),
                     "exhausted": max(0, current_exhausted - recovered),
                     "recovered": recovered,
                 }
