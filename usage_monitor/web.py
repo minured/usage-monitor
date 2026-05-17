@@ -424,6 +424,20 @@ def build_dashboard_patch_payload(
     }
 
 
+def _dashboard_patch_has_live_changes(
+    patch_payload: dict[str, Any],
+    previous_payload: dict[str, Any],
+) -> bool:
+    """判断 dashboard_patch 是否包含页面需要立即重绘的变化。"""
+    return bool(
+        patch_payload["upserted_items"]
+        or patch_payload["removed_dimension_keys"]
+        or patch_payload["summary"] != previous_payload.get("summary")
+        or patch_payload["exhausted_history"] != (previous_payload.get("exhausted_history") or [])
+        or patch_payload["exhausted_recovery"] != (previous_payload.get("exhausted_recovery") or [])
+    )
+
+
 _TABLE_COLUMN_SPECS: tuple[tuple[str, str, str], ...] = (
     ("email", "邮箱", "col-email"),
     ("lifecycle_status", "生命周期", "col-lifecycle"),
@@ -3969,8 +3983,8 @@ def create_app(settings: Settings):
             known_accounts_revision = 0
         return current_filter, skip_initial_dashboard, known_accounts_revision
 
-    def _current_history_cache_hour() -> int:
-        return int(time() // 3600)
+    def _current_chart_cache_minute() -> int:
+        return int(time() // 60)
 
     def _build_dashboard_json(current_filter: str) -> bytes:
         revisions = database.fetch_change_state()
@@ -3978,7 +3992,7 @@ def create_app(settings: Settings):
             "dashboard",
             current_filter,
             int(revisions["accounts_revision"]),
-            _current_history_cache_hour(),
+            _current_chart_cache_minute(),
             _cpa_cache_bucket(settings),
         )
         return json_cache.get_or_build(
@@ -4000,7 +4014,7 @@ def create_app(settings: Settings):
             "index",
             int(revisions["accounts_revision"]),
             int(revisions["runtime_revision"]),
-            _current_history_cache_hour(),
+            _current_chart_cache_minute(),
             _cpa_cache_bucket(settings),
             1 if gzip_enabled else 0,
         )
@@ -4038,6 +4052,7 @@ def create_app(settings: Settings):
         last_accounts_revision = current_accounts_revision or int(initial_revisions["accounts_revision"])
         last_runtime_revision = int(initial_revisions["runtime_revision"])
         last_dashboard_payload = current_dashboard_payload
+        last_chart_cache_minute = _current_chart_cache_minute()
         last_keepalive_at = monotonic()
 
         try:
@@ -4053,15 +4068,16 @@ def create_app(settings: Settings):
                     yield _encode_sse_event("progress", build_progress_payload(settings, database))
                     emitted = True
 
-                if current_accounts_revision != last_accounts_revision:
+                current_chart_cache_minute = _current_chart_cache_minute()
+                if (
+                    current_accounts_revision != last_accounts_revision
+                    or current_chart_cache_minute != last_chart_cache_minute
+                ):
                     last_accounts_revision = current_accounts_revision
+                    last_chart_cache_minute = current_chart_cache_minute
                     next_dashboard_payload = build_dashboard_payload(settings, current_filter, database)
                     patch_payload = build_dashboard_patch_payload(last_dashboard_payload, next_dashboard_payload)
-                    if (
-                        patch_payload["upserted_items"]
-                        or patch_payload["removed_dimension_keys"]
-                        or patch_payload["summary"] != last_dashboard_payload.get("summary")
-                    ):
+                    if _dashboard_patch_has_live_changes(patch_payload, last_dashboard_payload):
                         yield _encode_sse_event("dashboard_patch", patch_payload)
                         emitted = True
                     last_dashboard_payload = next_dashboard_payload

@@ -34,6 +34,7 @@ from usage_monitor.openai_api import HTTPStatusError, InvalidResponseError, Tran
 from usage_monitor.timeutil import format_shanghai
 from usage_monitor.tokens import scan_tokens_dir
 from usage_monitor.web import (
+    _dashboard_patch_has_live_changes,
     build_dashboard_overview_payload,
     build_dashboard_patch_payload,
     build_dashboard_payload,
@@ -1147,6 +1148,30 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertEqual(patch_payload["exhausted_history"], [{"captured_at_utc": "2026-03-18T00:05:00Z", "exhausted": 1}])
         self.assertEqual(patch_payload["removed_dimension_keys"], ["acct-1::team::user-1"])
         self.assertEqual([item["dimension_key"] for item in patch_payload["upserted_items"]], ["acct-2::team::user-2"])
+        self.assertTrue(_dashboard_patch_has_live_changes(patch_payload, previous_payload))
+
+    def test_dashboard_patch_live_changes_include_chart_windows(self) -> None:
+        previous_payload = {
+            "summary": {"total": 1, "active": 1, "available": 0, "exhausted": 1, "unknown": 0, "invalid": 0, "source_missing": 0},
+            "items": [],
+            "exhausted_history": [{"captured_at_utc": "2026-03-18T00:00:00Z", "exhausted": 1}],
+            "exhausted_recovery": [{"projected_at_utc": "2026-03-18T00:00:00Z", "exhausted": 1, "recovered": 0}],
+        }
+        same_payload = {
+            **previous_payload,
+            "generated_at": "2026-03-18T00:01:00Z",
+            "accounts_revision": 1,
+            "filter": "all",
+        }
+        same_patch = build_dashboard_patch_payload(previous_payload, same_payload)
+        self.assertFalse(_dashboard_patch_has_live_changes(same_patch, previous_payload))
+
+        moved_payload = {
+            **same_payload,
+            "exhausted_recovery": [{"projected_at_utc": "2026-03-18T00:01:00Z", "exhausted": 1, "recovered": 0}],
+        }
+        moved_patch = build_dashboard_patch_payload(previous_payload, moved_payload)
+        self.assertTrue(_dashboard_patch_has_live_changes(moved_patch, previous_payload))
 
     def test_dashboard_api_cache_refreshes_when_accounts_revision_changes(self) -> None:
         database = UsageDatabase(self.settings.db_path)
@@ -2253,6 +2278,9 @@ class UsageMonitorTestCase(unittest.TestCase):
         self.assertIn('id="sticky-filter-list"', body)
         self.assertIn('dashboardRevision: Number(initialDashboardPayload.accounts_revision || 0),', body)
         self.assertIn("connectEventStream(false);", body)
+        self.assertIn("def _current_chart_cache_minute() -> int:", Path("usage_monitor/web.py").read_text(encoding="utf-8"))
+        self.assertIn("current_chart_cache_minute != last_chart_cache_minute", Path("usage_monitor/web.py").read_text(encoding="utf-8"))
+        self.assertIn("_dashboard_patch_has_live_changes(patch_payload, last_dashboard_payload)", Path("usage_monitor/web.py").read_text(encoding="utf-8"))
         self.assertIn("const EVENT_STREAM_RECONNECT_DELAY_MS = 1500;", body)
         self.assertIn("const RESUME_SYNC_COOLDOWN_MS = 1200;", body)
         self.assertIn("function scheduleEventStreamReconnect(delayMs = EVENT_STREAM_RECONNECT_DELAY_MS) {", body)
